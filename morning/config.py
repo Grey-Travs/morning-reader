@@ -42,6 +42,11 @@ class PathsConfig(BaseModel):
 class TranslationConfig(BaseModel):
     chunk_threshold: int = 12000
     continuity_paragraphs: int = 3
+    # How many EXTRA attempts a chapter gets when it fails its checks. One, because a
+    # retry is told why the first attempt failed and a second identical prompt tends to
+    # produce a second identical answer — past that, the money is better spent on a
+    # human looking at it. Zero disables the retry entirely.
+    validation_retries: int = 1
     # Per-project framing for the system prompt (genre/tone/audience). Empty means a
     # neutral "Japanese web novel". Set per project so a light novel is not framed as
     # literary fiction.
