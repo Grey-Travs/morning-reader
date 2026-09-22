@@ -84,6 +84,23 @@ export const api = {
     req(`/api/projects/${pid}/run/cancel`, json({ stop_current: stopCurrent })),
   resume: (pid) => req(`/api/projects/${pid}/run/resume`, json({})),
 
+  // Reading. `from_audit` on the response says the English shown has NOT been
+  // accepted yet — it is the review copy. The reader must surface that rather than
+  // presenting un-reviewed work as finished.
+  read: (pid, index) => req(`/api/projects/${pid}/read/${index}`),
+  accept: (pid, index, english = null) =>
+    req(`/api/projects/${pid}/chapters/${index}/accept`,
+        json(english === null ? {} : { english })),
+
+  // The glossary and the terms waiting on a human. Both come back together because
+  // deciding whether a proposed term is new means looking at what is already there.
+  glossary: (pid) => req(`/api/projects/${pid}/glossary`),
+  approveTerm: (pid, entry) => req(`/api/projects/${pid}/glossary/approve`, json(entry)),
+  rejectTerm: (pid, source) =>
+    req(`/api/projects/${pid}/glossary/reject`, json({ source })),
+  removeTerm: (pid, source) =>
+    req(`/api/projects/${pid}/glossary/remove`, json({ source })),
+
   queueOverview: () => req('/api/queue'),
   activeJob: (pid) => req(`/api/projects/${pid}/active-job`),
 

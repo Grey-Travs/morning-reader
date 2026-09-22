@@ -6,6 +6,11 @@ import JobConsole from '../components/JobConsole'
 import { CLASS_LABEL, STATUS_LABEL, STATUS_TONE, countLabel, percent } from '../format'
 import { useJobStream } from '../useJobStream'
 
+// Statuses whose chapter has English worth opening. `needs-review` is included on
+// purpose: that prose exists and was paid for, and the reader is explicit that it has
+// not been accepted.
+const READABLE = new Set(['translated', 'validated', 'needs-review'])
+
 export default function ProjectPage() {
   const { pid } = useParams()
   const [data, setData] = useState(null)
@@ -38,6 +43,31 @@ export default function ProjectPage() {
     } catch (err) {
       setError(err)
     }
+  }
+
+  // Translating spends the Claude plan's allowance, and a sweep over a long novel
+  // spends a lot of it. Confirm first — and say HOW MUCH work is about to start,
+  // because "are you sure?" with no number is a dialog people learn to click through.
+  const translate = async (body) => {
+    const count = body.indices
+      ? body.indices.length
+      : chapters.filter((c) => c.class === 'source'
+          && !['validated', 'translated'].includes(c.status)).length
+    if (count === 0) {
+      setError({ explained: {
+        code: 'nothing-to-do',
+        title: 'There is nothing left to translate',
+        what: 'Every chapter that needs translating has been done already.',
+        fixes: ['Select specific chapters to redo them.'],
+      } })
+      return
+    }
+    const ok = window.confirm(
+      `Translate ${countLabel(count, 'chapter')}?\n\n`
+      + 'This uses your Claude plan. You can stop it at any time, and anything '
+      + 'already finished is never redone.')
+    if (!ok) return
+    await start({ ...body, kind: 'translate' })
   }
 
   const stop = async (stopCurrent) => {
@@ -82,6 +112,10 @@ export default function ProjectPage() {
           {countLabel(chapters.length, 'chapter')}
           {staleCount > 0 && ` · ${staleCount} changed since it was last looked at`}
           {totals?.cost_usd ? ` · $${totals.cost_usd.toFixed(4)}` : ''}
+          {' · '}
+          <Link to={`/work/${pid}/glossary`} style={{ color: 'var(--accent)' }}>
+            Glossary
+          </Link>
         </p>
       </div>
 
@@ -93,12 +127,18 @@ export default function ProjectPage() {
 
       <div className="mb-5 flex flex-wrap items-center gap-2">
         <button type="button" className="btn btn-primary"
+                onClick={() => translate(anySelected ? { indices: [...selected] } : {})}>
+          {anySelected
+            ? `Translate ${countLabel(selected.size, 'chapter')}`
+            : 'Translate everything'}
+        </button>
+        <button type="button" className="btn"
                 onClick={() => start(anySelected ? { indices: [...selected] } : {})}>
-          {anySelected ? `Prepare ${countLabel(selected.size, 'chapter')}` : 'Prepare everything'}
+          {anySelected ? 'Prepare selected' : 'Prepare everything'}
         </button>
         <button type="button" className="btn"
                 onClick={() => start(anySelected ? { indices: [...selected], force: true } : { force: true })}>
-          Redo {anySelected ? 'selected' : 'everything'}
+          Re-prepare {anySelected ? 'selected' : 'everything'}
         </button>
         {anySelected && (
           <button type="button" className="btn" onClick={() => setSelected(new Set())}>
@@ -142,7 +182,12 @@ export default function ProjectPage() {
                          onChange={() => toggle(chapter.index)} />
                 </td>
                 <td className="p-2 text-hint">{chapter.index}</td>
-                <td className="max-w-0 truncate p-2 font-source">{chapter.title}</td>
+                <td className="max-w-0 truncate p-2 font-source">
+                  {READABLE.has(chapter.status) ? (
+                    <Link to={`/work/${pid}/read/${chapter.index}`}
+                          style={{ color: 'inherit' }}>{chapter.title}</Link>
+                  ) : chapter.title}
+                </td>
                 <td className="p-2">
                   <span className="pill text-hint">
                     {CLASS_LABEL[chapter.class] || chapter.class}
