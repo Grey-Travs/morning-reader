@@ -1,0 +1,19 @@
+# Backend (engine + web API)
+pydantic>=2.6
+fastapi>=0.110
+uvicorn[standard]>=0.29
+# Required by FastAPI's UploadFile, which the .txt ingestion endpoint uses. FastAPI
+# raises at REQUEST time rather than import time when it is missing, so an undeclared
+# copy inherited from another environment hides the gap until someone uploads a file.
+python-multipart>=0.0.9
+# Already present transitively via uvicorn/click; declared explicitly because the live
+# job console uses it to enable ANSI colour in the Windows terminal.
+colorama>=0.4.6
+
+# Tests
+pytest>=8.0
+httpx>=0.27          # fastapi.testclient needs it
+
+# NOT here, deliberately: no HTTP client for outbound calls, no browser automation,
+# no site adapters. Morning Reader translates and reads; it never publishes. The
+# absence is enforced by tests/test_scope_guards.py, not just by this comment.

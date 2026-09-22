@@ -1,0 +1,32 @@
+# Morning Reader configuration. Copy this to config.toml and edit.
+# config.toml is gitignored — it holds your settings, not the app's.
+
+[anthropic]
+model = "claude-opus-5"
+effort = "high"        # low | medium | high | xhigh | max
+thinking = true
+api_retry_count = 4
+
+[translation]
+chunk_threshold = 12000
+continuity_paragraphs = 3
+# Per-project framing lives on the project record; these are the defaults.
+style_note = ""
+extra_instruction = ""
+honorific_note = "Keep -san, -kun, -chan, -sama, -sensei and -senpai attached to names; render them as suffixes rather than translating them into English titles."
+# Chapters below this fraction of Japanese script are treated as already English and
+# skipped rather than translated into English a second time. See morning/japanese.py
+# for exactly what counts — notably, Japanese quote marks 「」 do NOT.
+skip_non_source = true
+min_source_fraction = 0.15
+
+[validation]
+# NOT YET CALIBRATED for Japanese -> English. These values are carried over from the
+# Korean pair so the shape of the config is settled; re-derive them from real Japanese
+# pairs before trusting the check, then set ratio_band_calibrated = true.
+length_ratio_min = 1.6
+length_ratio_max = 3.2
+ratio_band_calibrated = false
+paragraph_tolerance = 2
+paragraph_tolerance_pct = 0.05
+dialogue_tolerance = 3

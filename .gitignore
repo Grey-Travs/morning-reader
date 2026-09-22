@@ -1,0 +1,35 @@
+# Secrets / OAuth — never commit
+client_secret*.json
+token.json
+.env
+
+# Personal config (holds your settings; copy from config.example.toml)
+config.toml
+
+# Your projects & progress (per-user data, not source)
+projects/
+
+# Error tracebacks written by the server (breadcrumbs for diagnosing, not source)
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Atomic-write temp files. Named per CALL (see morning/atomic.py), so a crashed
+# write can leave one behind; it must never be mistaken for a source file.
+*.tmp
+*.unreadable-*
+
+# Web
+web/node_modules/
+web/dist/
+
+# OS / editor / local tooling
+.DS_Store
+.claude/
+.vscode/
+.idea/

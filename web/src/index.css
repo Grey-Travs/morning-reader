@@ -1,0 +1,158 @@
+@import "tailwindcss";
+
+/* Morning Reader's palette. Light by default — the name is not an accident; this is
+   meant to be read in the morning — with a dark scheme for anyone whose system asks
+   for one. Everything is a token so a theme change is one block, not a sweep. */
+:root {
+  --bg: #fbfaf7;
+  --surface: #ffffff;
+  --surface-2: #f4f2ed;
+  --ink: #1e1c18;
+  --muted: #5d574d;
+  --hint: #8a8377;
+  --line: #e6e2d9;
+  --line-strong: #d3cdc0;
+  --accent: #b4532a;
+  --accent-ink: #ffffff;
+  --ok: #2f6f46;
+  --warn: #9a6b12;
+  --bad: #a3342a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #171614;
+    --surface: #1f1e1b;
+    --surface-2: #272521;
+    --ink: #eeeae1;
+    --muted: #a8a196;
+    --hint: #7e776b;
+    --line: #322f2a;
+    --line-strong: #453f38;
+    --accent: #e2814f;
+    --accent-ink: #1a1512;
+    --ok: #6cc08a;
+    --warn: #d6a545;
+    --bad: #e2796c;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #171614;
+  --surface: #1f1e1b;
+  --surface-2: #272521;
+  --ink: #eeeae1;
+  --muted: #a8a196;
+  --hint: #7e776b;
+  --line: #322f2a;
+  --line-strong: #453f38;
+  --accent: #e2814f;
+  --accent-ink: #1a1512;
+  --ok: #6cc08a;
+  --warn: #d6a545;
+  --bad: #e2796c;
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans JP", "Hiragino Kaku Gothic ProN",
+    "Yu Gothic", Meiryo, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Japanese source text. A serif face with real Japanese coverage, and a line height
+   that suits a script with no inter-word spaces — the default is too tight to scan. */
+.font-source {
+  font-family: "Noto Serif JP", "Hiragino Mincho ProN", "Yu Mincho", "MS Mincho",
+    ui-serif, Georgia, serif;
+  line-height: 2;
+}
+
+.text-muted { color: var(--muted); }
+.text-hint { color: var(--hint); }
+.text-accent { color: var(--accent); }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 9px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.875rem;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.btn:hover:not(:disabled) { background: var(--surface-2); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.btn-primary:hover:not(:disabled) { filter: brightness(1.07); background: var(--accent); }
+
+.field {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  color: var(--ink);
+  padding: 0.5rem 0.7rem;
+  font-size: 0.9rem;
+}
+.field:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.pill {
+  display: inline-block;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  padding: 0.05rem 0.5rem;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.page { max-width: 68rem; margin: 0 auto; padding: 1.5rem 1rem 4rem; }
+.page-narrow { max-width: 46rem; }
+
+@media (max-width: 480px) {
+  .page { padding-left: 1rem; padding-right: 1rem; }
+}
+
+/* The live console. Monospace, and it must not force the page to scroll sideways on
+   a phone — a long Japanese title would otherwise widen the whole layout. */
+.console {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  padding: 0.75rem;
+  max-height: 22rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+}
+
+.bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--accent); transition: width 160ms ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
