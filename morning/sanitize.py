@@ -74,6 +74,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from .japanese import source_fraction
 from .textsource import SEP_RE
 
 # ---------------------------------------------------------------- meta leaks
@@ -347,6 +348,15 @@ class LeakReport:
 
     flagged: bool = False
     findings: list[LeakFinding] = field(default_factory=list)
+    # How much Japanese remains once everything deliberately kept has been subtracted.
+    #
+    # Carried here rather than recomputed by the caller so that the coarse
+    # "was this chapter translated at all?" test and the fine-grained run scan agree
+    # about what counts. Measuring the coarse one on the RAW text instead made a
+    # chapter full of legitimately kept terms fail as untranslated even after the
+    # reader had added every one of them to the glossary — the leak findings
+    # disappeared and the failure did not.
+    residual_fraction: float = 0.0
 
     def summary(self) -> str:
         if not self.flagged:
@@ -444,7 +454,8 @@ def source_leak_report(text, *, glossary=None, extra_terms=()) -> LeakReport:
                 findings.append(LeakFinding(text=match.group(0).strip(), line=lineno,
                                             score=score, reasons=reasons))
 
-    return LeakReport(flagged=bool(findings), findings=findings)
+    return LeakReport(flagged=bool(findings), findings=findings,
+                      residual_fraction=round(source_fraction(cleaned), 4))
 
 
 def has_source_leak(text, *, glossary=None, extra_terms=()) -> bool:
