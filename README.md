@@ -3,9 +3,9 @@
 Japanese novels and manga, translated and read locally. A sibling to Night Reader, not
 a fork of it.
 
-**Status: step 1 of 5 — the spine.** Project storage, state, locks, atomic writes, the
-job queue, legible errors, and Activity, proved end to end with a pasted `.txt` novel.
-There is no translator yet; that is step 2.
+**Status: step 2 of 5 — the novel pipeline.** Paste or upload a Japanese `.txt`,
+translate it, review what the checks flagged, approve the terms it proposed, and read
+it. Google Docs ingestion is the one part of step 2 still outstanding.
 
 ---
 
@@ -75,15 +75,23 @@ developing; a reload would kill an in-flight job, so it is off by default).
 ## Tests
 
 ```bash
-.venv\Scripts\python.exe -m pytest tests/ -q     # 273 tests
-cd web && npm test                                # 18 tests
+.venv\Scripts\python.exe -m pytest tests/ -q     # 592 tests
+cd web && npm test                                # 31 tests
 ```
 
-The reference app is roughly 29% tests and that is why it survives. Two bugs in this
-repo were found by its tests before any of it ran for real: a one-line chapter being
-silently dropped by the title-detection, and EUC-JP text being decoded as CP932 because
-"the first encoding that does not raise" is the wrong algorithm when two encodings have
-overlapping byte validity.
+**No test makes a real model call.** The SDK's `query` is replaced by a fake async
+generator yielding real SDK message objects, so the control flow under test —
+streaming, aborting, retrying, rate limits, truncation — is the real control flow at
+no cost.
+
+The reference app is roughly 29% tests and that is why it survives. Several bugs in
+this repo were found by its own tests before any of it ran for real: a one-line
+chapter silently dropped by the title detection; EUC-JP decoded as CP932 because "the
+first encoding that does not raise" is the wrong algorithm when two encodings have
+overlapping byte validity; `strip_meta` deleting a whole paragraph when the model
+corrected itself mid-paragraph; and the glossary allow-list applying to one residue
+check but not the other, so a reader could add a kept term, watch the finding vanish,
+and still have the chapter fail on the same characters.
 
 ## Layout
 
@@ -96,6 +104,13 @@ morning/          the engine — imports nothing from the web layer
   pageread.py     THE REGION CONTRACT
   japanese.py     script detection (the easy half of the language layer)
   textsource.py   paste / .txt ingestion
+  glossary.py     entries with VARIANTS, and the human approval gate
+  prompts.py      the Japanese prompt; the model answers under `source`
+  translator.py   drives the Claude Code CLI; every tool blocked
+  sanitize.py     model chatter (strip) vs untranslated source (flag)
+  validate.py     the checks that decide read-or-review
+  pipeline.py     one chapter end to end
+  chapter_files.py  where output lands; everything resolves by INDEX
   config.py       typed config; the ratio band is NOT yet calibrated
 server/
   app.py          FastAPI routes
@@ -107,18 +122,33 @@ server/
 web/              Vite + React interface: Library, work page, Activity
 ```
 
+## Two rules worth knowing before reading the code
+
+**A chapter that validates goes to `chapters/` and is read. A chapter that does not
+goes ONLY to its audit copy.** That split is the whole safety property: a questionable
+translation must never be mistaken for a finished one. The audit copy is then the only
+copy, which is what the reader shows (saying plainly that it is unaccepted) and what
+Accept promotes.
+
+**Nothing deletes prose.** Untranslated Japanese is FLAGGED, never removed; model
+chatter is removed only when the block holds nothing else. Losing a leak is
+recoverable, deleting prose is not.
+
 ## What is deliberately not done yet
 
-* **No translator.** Step 1's one task is `prepare`: segment, measure, classify. It
-  makes no model call, which is exactly why it can exercise every branch of the
-  worker — skip, stop, refuse, fail, succeed — without spending anything.
 * **The length-ratio band is carried over from Korean and marked uncalibrated.**
-  `/api/health` reports `ratio_band_calibrated: false`. Re-derive it from real Japanese
-  pairs before the validator is trusted.
-* **Source-residue detection is not written**, and not faked. Night Reader keeps chat
-  laughter out of its detector by character range; Japanese laughter is `www` and `草`,
-  which are Latin and an ordinary Kanji. That needs a different rule, not a swapped
-  regex, and a half-right one that passes leaked Japanese is worse than none.
+  `/api/health` reports `ratio_band_calibrated: false`, and while it is false an
+  out-of-band ratio WARNS instead of failing the chapter. `metrics.length_ratio` is
+  recorded on every chapter from day one — that is the data a re-derivation needs.
+* **No character-gender check.** The glossary pins `pronoun` and the prompt treats
+  that pin as authoritative, so the input exists; detecting a contradiction in the
+  output is separate work and is not faked meanwhile.
+* **Google Docs ingestion.** The remaining ingestion path from step 2.
+* **Source-residue detection misses two shapes on purpose**, and says so in
+  `morning/sanitize.py` with passing tests either way. Noun-only residue (`本日休業`)
+  and very short utterances are not caught, because a threshold low enough to catch
+  them flags every kept shop sign and sound effect. Making the rule stricter later
+  should therefore be a decision, not a surprise.
 * **`width`/`height` are on the contract but nothing obtains them yet.** The
   recommendation on the record: sniff them from the image header bytes server-side —
   JPEG, PNG and WebP all carry dimensions in the first few KB — which needs no Pillow
@@ -127,8 +157,8 @@ web/              Vite + React interface: Library, work page, Activity
 ## Build order
 
 1. ~~Spine: storage, state, locks, atomic writes, job queue, errors, Activity.~~ ✔
-2. Novel pipeline: translate → validate → retry → audit → reader, plus the glossary and
-   its pending queue. Google Docs ingestion.
+2. ~~Novel pipeline: translate → validate → retry → audit → reader, plus the glossary
+   and its pending queue.~~ ✔ — except Google Docs ingestion.
 3. Page harness with the region contract; novels flatten regions.
 4. Manga: reading order, overlay reader, script view.
 5. The Japanese site-export stripper, once real samples exist.
