@@ -36,6 +36,10 @@ class PathsConfig(BaseModel):
     state_file: Path = Path("state.json")
     audit_dir: Path = Path("audit")
     glossary_json: Path = Path("glossary.json")
+    # A human-readable companion, rewritten whenever the JSON is. The JSON is the
+    # source of truth; this exists so a name can be checked at a glance without
+    # opening a data file.
+    glossary_md: Path = Path("glossary.md")
     glossary_pending: Path = Path("glossary_pending.json")
 
 

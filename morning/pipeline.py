@@ -25,7 +25,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .chapter_files import write_audit, write_chapter_file
+from .chapter_files import (
+    read_audit_translation, write_audit, write_chapter_file,
+)
 from .chapters import KIND_EMPTY, KIND_ENGLISH, Chapter, classify
 from .config import Config
 from .glossary import Glossary, load_pending, merge_pending, save_pending
@@ -117,6 +119,41 @@ def queue_new_terms(cfg: Config, glossary: Glossary, terms: list[dict]) -> int:
     if added:
         save_pending(path, queue)
     return added
+
+
+def accept_chapter(chapter: Chapter, total: int, cfg: Config, state: State,
+                   english: str | None = None) -> str:
+    """Promote a reviewed chapter's translation into ``chapters/``.
+
+    This is the other half of the audit copy's purpose. A chapter that failed its
+    checks was written only to audit/, precisely so a questionable translation could
+    not be mistaken for a finished one; accepting it is the human saying "I looked, and
+    it is fine". Only then does it become readable.
+
+    ``english`` overrides what is on disk, so the reviewer can fix a line first. When
+    it is omitted the audit copy is promoted unchanged.
+
+    Raises ``FileNotFoundError`` when there is nothing to accept, rather than writing
+    an empty chapter — which would look exactly like a successful accept.
+    """
+    prose = english if english is not None else read_audit_translation(
+        cfg.paths.audit_dir, chapter.index, total)
+    if not (prose or "").strip():
+        raise FileNotFoundError(
+            f"there is no saved translation for chapter {chapter.index} to accept")
+
+    write_chapter_file(cfg.paths.output_dir, chapter.index, total, prose)
+    state.update(
+        chapter.index,
+        status=STATUS_VALIDATED,
+        title=chapter.title,
+        source_hash=chapter.metrics.content_hash,
+        # Kept, not cleared. Why it was flagged is still true and still worth seeing
+        # later; what changed is that a human decided it was acceptable anyway.
+        accepted=True,
+        error=None,
+    )
+    return STATUS_VALIDATED
 
 
 def process_chapter(chapter: Chapter, total: int, translator: Translator,

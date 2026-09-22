@@ -20,18 +20,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
+from morning.chapter_files import (
+    has_previous, output_total, read_audit_translation, read_chapter,
+)
 from morning.chapters import classify
 from morning.config import Config
+from morning.glossary import (
+    VALID_TYPES, Glossary, GlossaryEntry, glossary_lock, load_pending, save_pending,
+)
+from morning.pipeline import accept_chapter
 from morning.state import State
 from morning.textsource import decode_upload, split_text_into_chapters
 
 from . import errors, jobs, projects as pj, tasks as task_mod
+from .locks import file_lock
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.toml"
@@ -304,6 +313,175 @@ def replace_source(pid: str, req: ReplaceSource) -> dict:
     pj.save_source(pid, chapters)
     pj.set_chapter_count(pid, len(chapters))
     return {"chapters": len(chapters)}
+
+
+# ---- reading -----------------------------------------------------------------
+
+def _require_chapter(pid: str, index: int) -> tuple[list, object]:
+    chapters = pj.load_source(pid)
+    chapter = next((c for c in chapters if c.index == index), None)
+    if chapter is None:
+        raise HTTPException(404, "There is no chapter with that number in this project.")
+    return chapters, chapter
+
+
+@app.get("/api/projects/{pid}/read/{index}")
+def read_chapter_view(pid: str, index: int) -> dict:
+    """One chapter as it should be read: the English, with its source beside it.
+
+    ``from_audit`` is the field that matters. A chapter that failed its checks has its
+    translation only in the audit copy, and showing that prose without saying so would
+    present un-reviewed work as finished — which is exactly the confusion the
+    chapters/-versus-audit/ split exists to prevent.
+    """
+    _, cfg = project_cfg(pid)
+    chapters, chapter = _require_chapter(pid, index)
+    total = output_total(Path(cfg.paths.output_dir), len(chapters))
+    record = State.load(cfg.paths.state_file).get(index) or {}
+
+    english = read_chapter(Path(cfg.paths.output_dir), index, total)
+    from_audit = False
+    if english is None:
+        english = read_audit_translation(Path(cfg.paths.audit_dir), index, total)
+        from_audit = english is not None
+
+    indices = [c.index for c in chapters]
+    position = indices.index(index)
+    return {
+        "index": index,
+        "title": chapter.title,
+        "english": english,
+        "source": chapter.paragraphs,
+        "status": record.get("status", ""),
+        "from_audit": from_audit,
+        "accepted": bool(record.get("accepted")),
+        "failures": record.get("failures", []),
+        "warnings": record.get("warnings", []),
+        "leak_findings": record.get("leak_findings", []),
+        "validation": record.get("validation", {}),
+        "has_previous_version": has_previous(Path(cfg.paths.output_dir), index, total),
+        "prev": indices[position - 1] if position > 0 else None,
+        "next": indices[position + 1] if position + 1 < len(indices) else None,
+    }
+
+
+class AcceptRequest(BaseModel):
+    # Lets the reviewer fix a line before promoting it. Omitted means "promote what is
+    # in the audit copy unchanged".
+    english: str | None = None
+
+
+@app.post("/api/projects/{pid}/chapters/{index}/accept")
+def accept(pid: str, index: int, req: AcceptRequest = AcceptRequest()) -> dict:
+    """Promote a reviewed chapter into ``chapters/`` so it can be read.
+
+    The human half of the review gate: the chapter failed a check, someone looked, and
+    they are saying it is fine anyway. Why it was flagged stays on the record.
+    """
+    _, cfg = project_cfg(pid)
+    chapters, chapter = _require_chapter(pid, index)
+    if jobs.active_job(pid) is not None:
+        raise HTTPException(409, "Something is still running on this project. Stop it "
+                                 "first, then accept.")
+    total = output_total(Path(cfg.paths.output_dir), len(chapters))
+    try:
+        with jobs.mutate_state(cfg.paths.state_file) as state:
+            status = accept_chapter(chapter, total, cfg, state, english=req.english)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"index": index, "status": status}
+
+
+# ---- the glossary ------------------------------------------------------------
+
+@app.get("/api/projects/{pid}/glossary")
+def get_glossary(pid: str) -> dict:
+    """Locked terms, and the ones waiting on a human.
+
+    Both in one response because the review screen shows them together: deciding
+    whether a proposed term is new usually means looking at what is already there.
+    """
+    _, cfg = project_cfg(pid)
+    glossary = Glossary.load(cfg.paths.glossary_json)
+    return {
+        "entries": [asdict(e) for e in glossary.entries()],
+        "pending": load_pending(cfg.paths.glossary_pending),
+    }
+
+
+@app.post("/api/projects/{pid}/glossary/approve")
+def approve_term(pid: str, body: dict) -> dict:
+    """Move a proposed term into the glossary, with whatever edits the reviewer made.
+
+    The body is the WHOLE entry rather than a reference to the queued one, because
+    correcting a wrong reading is the main reason this gate exists — a name's kanji
+    usually have several possible readings, and the model picked one.
+
+    A plain dict rather than a Pydantic model on purpose. ``GlossaryEntry.from_dict``
+    already coerces and validates every field, and it is what the queue and the engine
+    both go through — a second schema here would be a second place for the two to
+    drift, and one of its field names (``register``) shadows a BaseModel attribute.
+    """
+    _, cfg = project_cfg(pid)
+    if not isinstance(body, dict):
+        raise HTTPException(400, "A glossary entry must be an object.")
+    entry = GlossaryEntry.from_dict(body)
+    if not (entry.source or entry.english):
+        raise HTTPException(400, "A glossary entry needs a source term or an English "
+                                 "spelling.")
+    if entry.type not in VALID_TYPES:
+        raise HTTPException(400, f"Unknown term type {entry.type!r}.")
+    # Held across read → modify → write so a second approval cannot interleave and
+    # drop the first. The lock is the shared registry's, so a save from the worker
+    # cannot interleave either.
+    with glossary_lock(cfg.paths.glossary_json):
+        glossary = Glossary.load(cfg.paths.glossary_json)
+        glossary.add(entry)
+        glossary.save(cfg.paths.glossary_json, cfg.paths.glossary_md)
+    _drop_pending(cfg, str(body.get("source") or entry.source))
+    return {"approved": entry.source or entry.english,
+            "entries": len(Glossary.load(cfg.paths.glossary_json))}
+
+
+class TermRef(BaseModel):
+    source: str
+
+
+@app.post("/api/projects/{pid}/glossary/reject")
+def reject_term(pid: str, req: TermRef) -> dict:
+    """Drop a proposed term without locking it.
+
+    It can be proposed again by a later chapter, which is correct: rejecting means
+    "not this spelling", not "never mention this again".
+    """
+    _, cfg = project_cfg(pid)
+    removed = _drop_pending(cfg, req.source)
+    return {"rejected": removed}
+
+
+@app.post("/api/projects/{pid}/glossary/remove")
+def remove_term(pid: str, req: TermRef) -> dict:
+    """Unlock a term that is already in the glossary."""
+    _, cfg = project_cfg(pid)
+    with glossary_lock(cfg.paths.glossary_json):
+        glossary = Glossary.load(cfg.paths.glossary_json)
+        removed = glossary.remove(req.source)
+        if removed:
+            glossary.save(cfg.paths.glossary_json, cfg.paths.glossary_md)
+    return {"removed": removed}
+
+
+def _drop_pending(cfg: Config, source: str) -> bool:
+    """Take one term off the pending queue. Returns whether it was there."""
+    path = cfg.paths.glossary_pending
+    with file_lock(path):
+        queue = load_pending(path)
+        remaining = [item for item in queue
+                     if str(item.get("source", "")) != source]
+        if len(remaining) == len(queue):
+            return False
+        save_pending(path, remaining)
+        return True
 
 
 # ---- the queue ---------------------------------------------------------------

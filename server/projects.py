@@ -228,6 +228,7 @@ def project_config(global_cfg: Config, project: dict) -> Config:
     cfg.paths.state_file = pdir / "state.json"
     cfg.paths.audit_dir = pdir / "audit"
     cfg.paths.glossary_json = pdir / "glossary.json"
+    cfg.paths.glossary_md = pdir / "glossary.md"
     cfg.paths.glossary_pending = pdir / "glossary_pending.json"
     # Per-project overrides. Novels and manga are separate works with no shared
     # glossary and no shared framing, which is why these live on the project rather
