@@ -3,6 +3,11 @@
 # shows up as a whole-file diff the first time anyone touches the repo elsewhere.
 * text=auto eol=lf
 
+# Windows batch files MUST keep CRLF. cmd.exe mis-parses multi-line blocks and
+# `goto :label` with bare LF, and it does so silently: the file runs and does the
+# wrong thing rather than reporting an error.
+*.bat text eol=crlf
+
 # Never touch these.
 *.png binary
 *.jpg binary
