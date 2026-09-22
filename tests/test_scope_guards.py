@@ -142,9 +142,9 @@ def test_the_api_states_that_it_does_not_publish():
 # separated in order to avoid.
 _BANNED_NAMES = re.compile(
     r"\b("
-    r"korean|hangul"                      # the app this one was split from
-    r"|japanese_fraction|japanese_hash"    # the same mistake in the new language
-    r"|jp_fraction|ja_fraction"
+    r"korean|hangul"                      # the app this one was split from; scope-guard: ok
+    r"|japanese_fraction|japanese_hash"    # the same mistake in the new language; scope-guard: ok
+    r"|jp_fraction|ja_fraction"  # scope-guard: ok
     r")\b",
     re.IGNORECASE,
 )
@@ -153,13 +153,11 @@ _BANNED_NAMES = re.compile(
 # would become an identifier or a stored value are checked. A line is treated as prose
 # when it is a comment or sits inside a docstring.
 #
-# The two files listed here are the ones that ASSERT the rule, so they necessarily
-# contain the banned words as test literals. Exempting them is not a loophole: a rule
-# that its own tests cannot state is a rule with no tests.
-_ALLOWED_PROSE_FILES = {
-    "tests/test_scope_guards.py",
-    "web/src/format.test.js",
-}
+# A line that genuinely must name the language — an assertion that the name is ABSENT,
+# which is how the rule is tested — marks itself with this pragma. Per-line rather than
+# per-file on purpose: exempting a whole test file would blind the guard to a real
+# violation elsewhere in it, and these files are long.
+_PRAGMA = "scope-guard: ok"
 
 
 # How a comment starts, per file type. Markdown is prose end to end and is not
@@ -170,14 +168,19 @@ _PROSE_SUFFIXES = {".md"}
 
 
 def _code_lines(path: Path) -> list[tuple[int, str]]:
-    """Lines with comments and docstrings removed, so only real code is examined."""
+    """Lines with comments and docstrings removed, so only real code is examined.
+
+    The pragma is looked for on the RAW line, before comments are stripped — it lives
+    in a comment, so stripping first would erase the very marker being checked for.
+    """
     if path.suffix in _PROSE_SUFFIXES:
         return []
     text = path.read_text(encoding="utf-8")
     lines = text.split("\n")
     if path.suffix != ".py":
         marker = _COMMENT_MARKERS.get(path.suffix, "//")
-        return [(i, line.split(marker)[0]) for i, line in enumerate(lines, 1)]
+        return [(i, line.split(marker)[0]) for i, line in enumerate(lines, 1)
+                if _PRAGMA not in line]
 
     try:
         tree = ast.parse(text, filename=str(path))
@@ -193,7 +196,7 @@ def _code_lines(path: Path) -> list[tuple[int, str]]:
 
     out = []
     for i, line in enumerate(lines, 1):
-        if i in blanked:
+        if i in blanked or _PRAGMA in line:
             continue
         out.append((i, line.split("#")[0]))
     return out
@@ -210,8 +213,6 @@ def test_no_identifier_names_the_source_language():
     """
     offences: list[str] = []
     for path in _source_files():
-        if _relative(path) in _ALLOWED_PROSE_FILES:
-            continue
         for lineno, line in _code_lines(path):
             match = _BANNED_NAMES.search(line)
             if match:

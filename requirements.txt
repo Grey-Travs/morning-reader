@@ -1,4 +1,8 @@
 # Backend (engine + web API)
+# The translation engine drives the Claude Code CLI through this. It is NOT an
+# outbound HTTP client to a site: it talks to a local process, which is why the
+# no-publishing guard in tests/test_scope_guards.py allows it and allows nothing else.
+claude-agent-sdk>=0.2.9
 pydantic>=2.6
 fastapi>=0.110
 uvicorn[standard]>=0.29

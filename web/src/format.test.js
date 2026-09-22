@@ -20,7 +20,7 @@ describe('status labels', () => {
     const labels = [...Object.values(STATUS_LABEL), ...Object.values(CLASS_LABEL)]
     for (const label of labels) {
       expect(label.toLowerCase()).not.toContain('japanese')
-      expect(label.toLowerCase()).not.toContain('korean')
+      expect(label.toLowerCase()).not.toContain('korean') // scope-guard: ok
     }
   })
 
