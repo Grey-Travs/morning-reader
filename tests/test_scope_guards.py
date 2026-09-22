@@ -234,12 +234,13 @@ def test_the_persisted_state_keys_are_language_free():
     """What actually lands in state.json for a real chapter."""
     from morning.chapters import Chapter
     from morning.config import Config
-    from server.tasks import Progress, prepare_chapter
+    from morning.state import State
+    from server.tasks import TaskContext, prepare_chapter
 
     result = prepare_chapter(
         Chapter(index=1, title="第1話",
                 paragraphs=["電車はまだ来ない。"]),
-        Config(), Progress())
+        TaskContext(cfg=Config(), state=State(), total=1))
 
     assert "source_hash" in result.fields
     assert "source_fraction" in result.fields

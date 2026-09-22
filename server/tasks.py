@@ -5,12 +5,12 @@ Job — which is what puts it in the Activity view, streams it to the live conso
 gives it Stop and the rate-limit auto-resume for free, without any of that being
 reimplemented per operation.
 
-A task is a plain blocking function. It is always called via ``run_in_threadpool``, so
-it may do file I/O and long CPU work, and it must NOT touch asyncio. It reports
-progress and checks for a stop through the ``Progress`` handle it is given.
+A task is a plain blocking function taking ``(chapter, context)``. It is always called
+via ``run_in_threadpool``, so it may do file I/O and long model calls, and it must NOT
+touch asyncio. It reports progress and learns about a stop through the handles on its
+context.
 
-Step 1 ships one task, ``prepare``. Step 2 adds translate/resolve/pronouns; step 3
-adds the page tasks. They plug in here and inherit the whole spine.
+Step 3 adds the page tasks. They plug in here and inherit the whole spine.
 """
 
 from __future__ import annotations
@@ -22,15 +22,26 @@ from dataclasses import dataclass, field
 from morning.chapters import KIND_EMPTY, KIND_ENGLISH, Chapter, classify
 from morning.config import Config
 from morning.exceptions import TaskAborted, TaskRefused
-from morning.state import STATUS_EMPTY, STATUS_ENGLISH, STATUS_PREPARED
+from morning.glossary import Glossary
+from morning.pipeline import process_chapter
+from morning.state import (
+    STATUS_EMPTY, STATUS_ENGLISH, STATUS_PREPARED, State,
+)
+from morning.translator import StreamHooks, Translator
 
 # ---- task kinds --------------------------------------------------------------
-TASK_PREPARE = "prepare"      # segment, measure and classify one chapter
-TASK_KINDS = (TASK_PREPARE,)
+TASK_PREPARE = "prepare"      # segment, measure and classify one chapter — no model call
+TASK_TRANSLATE = "translate"  # translate, validate, retry, record
+TASK_KINDS = (TASK_PREPARE, TASK_TRANSLATE)
+
+# Kinds that COST MONEY. The UI warns before starting one of these, and the terminal
+# reports the model and effort that will be used. Kept as a list rather than inferred
+# so a future free task cannot accidentally inherit the warning, or a paid one escape it.
+BILLED_TASK_KINDS = (TASK_TRANSLATE,)
 
 # Kinds whose index is a PAGE sequence number rather than a chapter index.
 #
-# Empty in step 1 and deliberately not deleted. Pages and chapters share one worker
+# Empty until step 3 and deliberately not deleted. Pages and chapters share one worker
 # but NOT one number space: once a scanned work has been built, page 5 and chapter 5
 # both exist and are different things. The dedup key is namespaced against exactly
 # this, and Night Reader shipped the bug first — a duplicate guard keyed on the bare
@@ -40,6 +51,7 @@ PAGE_TASK_KINDS: tuple[str, ...] = ()
 # How each kind is described in the UI and the terminal.
 TASK_LABEL = {
     TASK_PREPARE: "Preparing",
+    TASK_TRANSLATE: "Translating",
 }
 
 
@@ -50,8 +62,8 @@ def describe(kind: str, index: int) -> str:
 def queue_key(index: int, kind: str) -> str:
     """Dedup key for the pending set.
 
-    Namespaced by number space, not by task kind: two different things asked of the
-    same chapter should both be able to queue, but the same page and the same chapter
+    Namespaced by number space AND by kind: two different things asked of the same
+    chapter should both be able to queue, but the same page and the same chapter
     number must never collide. ``queue_state()`` still reports plain integer indices,
     so the Activity views and /api/queue are unaffected.
     """
@@ -59,7 +71,7 @@ def queue_key(index: int, kind: str) -> str:
     return f"{space}:{index}:{kind}"
 
 
-# ---- the handle a task gets --------------------------------------------------
+# ---- the handles a task gets --------------------------------------------------
 
 @dataclass
 class Progress:
@@ -98,6 +110,28 @@ class Progress:
 
 
 @dataclass
+class TaskContext:
+    """Everything a task needs that is not the chapter itself.
+
+    Built once per job rather than per item, because a Translator spawns a CLI process
+    and a Glossary reads a file — doing either per chapter would add a process launch
+    and a disk read to every item in a sweep.
+
+    ``state`` is the worker's in-memory copy. A task may mutate it; the WORKER owns
+    saving it, because the worker is the one holding the lock and merging against
+    concurrent edits to other chapters.
+    """
+
+    cfg: Config
+    state: State
+    total: int
+    glossary: Glossary = field(default_factory=Glossary)
+    translator: Translator | None = None
+    progress: Progress = field(default_factory=Progress)
+    hooks: StreamHooks = field(default_factory=StreamHooks)
+
+
+@dataclass
 class TaskResult:
     """What a task hands back for the worker to persist.
 
@@ -110,25 +144,30 @@ class TaskResult:
     fields: dict = field(default_factory=dict)
     usage: dict = field(default_factory=dict)
     cost_usd: float = 0.0
-    units: int = 0  # how much work this turned out to be, for the progress bar
+    units: int = 0                # how much work this turned out to be
+    # Already written to state by the task itself, so the worker must not write it
+    # again — a second add_usage would double-count the spend.
+    state_written: bool = False
+    failures: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 # ---- prepare -----------------------------------------------------------------
 
-def prepare_chapter(chapter: Chapter, cfg: Config, progress: Progress) -> TaskResult:
+def prepare_chapter(chapter: Chapter, ctx: TaskContext) -> TaskResult:
     """Segment, measure and classify one chapter, and record what it is.
 
-    The first real thing that happens to a chapter, and the precursor to translating
-    it. It makes no model call and costs nothing, which is exactly why it is the task
-    the spine is proved with: every branch of the worker — skip-as-done, stop, refuse,
-    fail, succeed — is exercised without spending a token or depending on a network.
+    The first thing that happens to a chapter, and the precursor to translating it. It
+    makes no model call and costs nothing — which is why it can exercise every branch
+    of the worker (skip-as-done, stop, refuse, fail, succeed) without spending a token
+    or depending on a network.
 
-    What it records is genuinely needed downstream: ``source_hash`` is the
-    resumability key for every later task, and the classification decides whether this
-    chapter is translated at all.
+    What it records is genuinely needed downstream: ``source_hash`` is the resumability
+    key for every later task, and the classification decides whether this chapter is
+    translated at all.
     """
     metrics = chapter.metrics
-    kind = classify(chapter, cfg.translation.min_source_fraction)
+    kind = classify(chapter, ctx.cfg.translation.min_source_fraction)
 
     # Walk the paragraphs rather than reading the metrics and returning. Two reasons,
     # both load-bearing: it gives Stop somewhere to take effect on a long chapter, and
@@ -137,12 +176,11 @@ def prepare_chapter(chapter: Chapter, cfg: Config, progress: Progress) -> TaskRe
     longest = 0
     for i, paragraph in enumerate(chapter.paragraphs, start=1):
         longest = max(longest, len(paragraph))
-        progress.step(i, total)
+        ctx.progress.step(i, total)
 
     if kind == KIND_EMPTY:
-        # Not a failure: a blank placeholder is a perfectly ordinary thing to find in
-        # a source document, and marking it failed would put it in the user's face
-        # forever.
+        # Not a failure: a blank placeholder is an ordinary thing to find in a source
+        # document, and marking it failed would put it in the user's face forever.
         status = STATUS_EMPTY
     elif kind == KIND_ENGLISH:
         status = STATUS_ENGLISH
@@ -168,15 +206,51 @@ def prepare_chapter(chapter: Chapter, cfg: Config, progress: Progress) -> TaskRe
     )
 
 
+# ---- translate ---------------------------------------------------------------
+
+def translate_chapter(chapter: Chapter, ctx: TaskContext) -> TaskResult:
+    """Translate one chapter. The only task here that spends money.
+
+    All of the decisions live in :func:`morning.pipeline.process_chapter` — where the
+    prose lands, when to retry, what to queue — because those are engine concerns and
+    the CLI will want them too. This is the thin adapter that hands it the worker's
+    context and turns its outcome back into a TaskResult.
+    """
+    if ctx.translator is None:
+        # Refused rather than failed: nothing was written and nothing broke.
+        raise TaskRefused("the translation engine is not available")
+
+    ctx.progress.check()
+    outcome = process_chapter(chapter, ctx.total, ctx.translator, ctx.glossary,
+                              ctx.cfg, ctx.state, hooks=ctx.hooks)
+    return TaskResult(
+        status=outcome.status,
+        usage=outcome.usage,
+        cost_usd=outcome.cost_usd,
+        units=max(1, len(chapter.paragraphs)),
+        # process_chapter has already written the record and the spend.
+        state_written=True,
+        failures=outcome.failures,
+        warnings=outcome.warnings,
+    )
+
+
 # ---- dispatch ----------------------------------------------------------------
 
-def run_task(kind: str, chapter: Chapter, cfg: Config, progress: Progress) -> TaskResult:
+_REGISTRY: dict[str, Callable[[Chapter, TaskContext], TaskResult]] = {
+    TASK_PREPARE: prepare_chapter,
+    TASK_TRANSLATE: translate_chapter,
+}
+
+
+def run_task(kind: str, chapter: Chapter, ctx: TaskContext) -> TaskResult:
     """Run one queued item. Blocking — always called via ``run_in_threadpool``."""
-    if kind == TASK_PREPARE:
-        return prepare_chapter(chapter, cfg, progress)
-    # An unknown kind is refused rather than failed: nothing was written and nothing
-    # broke, so the chapter keeps whatever status it had.
-    raise TaskRefused(f"there is nothing called {kind!r} to do")
+    handler = _REGISTRY.get(kind)
+    if handler is None:
+        # An unknown kind is refused rather than failed: nothing was written and
+        # nothing broke, so the chapter keeps whatever status it had.
+        raise TaskRefused(f"there is nothing called {kind!r} to do")
+    return handler(chapter, ctx)
 
 
 def applies_to(kind: str, chapter: Chapter, cfg: Config) -> bool:

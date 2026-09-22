@@ -286,11 +286,11 @@ def _stop_once_in_flight(pid: str, monkeypatch) -> None:
     """
     fired = {"done": False}
 
-    def stop_midway(kind, chapter, config, progress):
+    def stop_midway(kind, chapter, ctx):
         if not fired["done"]:
             fired["done"] = True
             jobs.cancel(pid, stop_current=True)
-        progress.check()   # a real long task polls here; this is where it raises
+        ctx.progress.check()  # a real long task polls here; this is where it raises
         raise AssertionError("the task should have been stopped before this")
 
     monkeypatch.setattr(task_mod, "run_task", stop_midway)
@@ -365,7 +365,7 @@ def test_a_refusal_leaves_the_item_exactly_as_it_was(monkeypatch):
     pid, cfg = _project(1)
     asyncio.run(_drain(pid, cfg, _items("prepare", 1)))
 
-    def refuse(kind, chapter, config, progress):
+    def refuse(kind, chapter, ctx):
         raise TaskRefused("there was nothing to correct")
 
     monkeypatch.setattr(task_mod, "run_task", refuse)
@@ -391,10 +391,10 @@ def test_one_bad_item_never_kills_the_queue(monkeypatch):
     pid, cfg = _project(4)
     real = task_mod.run_task
 
-    def sometimes_explode(kind, chapter, config, progress):
+    def sometimes_explode(kind, chapter, ctx):
         if chapter.index == 2:
             raise RuntimeError("the model returned something unreadable")
-        return real(kind, chapter, config, progress)
+        return real(kind, chapter, ctx)
 
     monkeypatch.setattr(task_mod, "run_task", sometimes_explode)
     job = asyncio.run(_drain(pid, cfg, _items("prepare", 1, 2, 3, 4)))
@@ -410,7 +410,7 @@ def test_a_failure_carries_the_same_explanation_the_http_layer_would_give(monkey
     dumping a raw exception string into the log."""
     pid, cfg = _project(1)
 
-    def explode(kind, chapter, config, progress):
+    def explode(kind, chapter, ctx):
         raise PermissionError(32, "being used by another process")
 
     monkeypatch.setattr(task_mod, "run_task", explode)
@@ -511,11 +511,11 @@ def test_the_worker_rides_out_a_rate_limit_and_resumes(monkeypatch):
     real = task_mod.run_task
     hits = {"n": 0}
 
-    def limited_once(kind, chapter, config, progress):
+    def limited_once(kind, chapter, ctx):
         if chapter.index == 1 and hits["n"] == 0:
             hits["n"] += 1
             raise RateLimited(RateLimitInfo(resets_at=time.time() + 0.3))
-        return real(kind, chapter, config, progress)
+        return real(kind, chapter, ctx)
 
     monkeypatch.setattr(task_mod, "run_task", limited_once)
     job = asyncio.run(_drain(pid, cfg, _items("prepare", 1, 2)))
@@ -534,11 +534,11 @@ def test_a_rate_limit_does_not_downgrade_work_already_finished(monkeypatch):
     real = task_mod.run_task
     hits = {"n": 0}
 
-    def limited_once(kind, chapter, config, progress):
+    def limited_once(kind, chapter, ctx):
         if hits["n"] == 0:
             hits["n"] += 1
             raise RateLimited(RateLimitInfo(resets_at=time.time() + 0.3))
-        return real(kind, chapter, config, progress)
+        return real(kind, chapter, ctx)
 
     monkeypatch.setattr(task_mod, "run_task", limited_once)
 
@@ -561,7 +561,7 @@ def test_repeated_rate_limits_give_up_and_pause_rather_than_burning_retries(monk
     monkeypatch.setattr(jobs, "_MAX_STRIKES", 2)
     _fast_rate_limits(monkeypatch)
 
-    def always_limited(kind, chapter, config, progress):
+    def always_limited(kind, chapter, ctx):
         raise RateLimited(RateLimitInfo(resets_at=time.time() + 0.1),
                           "usage limit reached")
 
@@ -618,12 +618,12 @@ def test_the_worker_does_not_clobber_an_edit_made_to_another_chapter(monkeypatch
     pid, cfg = _project(2)
     real = task_mod.run_task
 
-    def edit_another_chapter_midway(kind, chapter, config, progress):
+    def edit_another_chapter_midway(kind, chapter, ctx):
         if chapter.index == 1:
             # Stand in for a request thread touching chapter 2 while 1 is in flight.
             with jobs.mutate_state(cfg.paths.state_file) as state:
                 state.update(2, status="needs-review", note="edited by the user")
-        return real(kind, chapter, config, progress)
+        return real(kind, chapter, ctx)
 
     monkeypatch.setattr(task_mod, "run_task", edit_another_chapter_midway)
     asyncio.run(_drain(pid, cfg, _items("prepare", 1)))

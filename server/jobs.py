@@ -34,9 +34,12 @@ from pathlib import Path
 
 from fastapi.concurrency import run_in_threadpool
 
+from morning.chapter_files import output_total
 from morning.config import Config
 from morning.exceptions import RateLimited, TaskAborted, TaskRefused
+from morning.glossary import Glossary
 from morning.state import STATUS_FAILED, STATUS_PENDING, State
+from morning.translator import StreamHooks, Translator
 
 from . import console, errors, projects as pj, tasks as task_mod
 from .locks import file_lock
@@ -319,12 +322,102 @@ def _build_progress(job: Job, loop: asyncio.AbstractEventLoop
     return progress, lambda: _flush(force=True)
 
 
+def _build_stream_hooks(job: Job, loop: asyncio.AbstractEventLoop) -> StreamHooks:
+    """Live English, streamed into the console as the model writes it.
+
+    Separate from ``_build_progress`` because the two carry different things: progress
+    is a fraction, this is prose. Both run on a WORKER THREAD and marshal to the loop.
+
+    Text is NOT coalesced here the way progress is. A progress update is worth
+    batching because only the newest matters; a text delta is append-only, so dropping
+    one loses words.
+    """
+    def on_text(chunk: str) -> None:
+        def apply() -> None:
+            if job.live is None:
+                return
+            job.live["english"] = job.live.get("english", "") + chunk
+            job.publish_live({"type": "delta", "index": job.live.get("index"),
+                              "text": chunk})
+        loop.call_soon_threadsafe(apply)
+
+    def on_source(paragraphs: list[str]) -> None:
+        def apply() -> None:
+            if job.live is None:
+                return
+            job.live["source"] = paragraphs
+            job.publish_live({"type": "source", "index": job.live.get("index"),
+                              "source": paragraphs})
+        loop.call_soon_threadsafe(apply)
+
+    def on_reset(reason: str) -> None:
+        def apply() -> None:
+            if job.live is None:
+                return
+            # "retry" redoes the whole chapter, so everything streamed is void. A
+            # reconnect or restart only lost the current chunk, so what earlier chunks
+            # committed still stands.
+            job.live["english"] = ("" if reason == "retry"
+                                   else job.live.get("committed", ""))
+            job.publish_live({"type": "reset", "index": job.live.get("index"),
+                              "reason": reason, "english": job.live["english"]})
+        loop.call_soon_threadsafe(apply)
+
+    def on_chunk(i: int, n: int) -> None:
+        def apply() -> None:
+            if job.live is None:
+                return
+            # A chunk boundary is a commit point: prose from completed chunks is final,
+            # so a later reconnect must not throw it away.
+            job.live["committed"] = job.live.get("english", "")
+            job.live["chunk"] = [i, n]
+            job.publish_live({"type": "chunk", "index": job.live.get("index"),
+                              "chunk": [i, n]})
+        loop.call_soon_threadsafe(apply)
+
+    return StreamHooks(on_source=on_source, on_text=on_text, on_reset=on_reset,
+                       on_chunk=on_chunk, abort=job.abort)
+
+
+def _build_context(job: Job, cfg: Config, state: State, total: int) -> task_mod.TaskContext:
+    """Everything the tasks need beyond the chapter, built once per job.
+
+    A Translator spawns a CLI process and a Glossary reads a file; doing either per
+    chapter would add a process launch and a disk read to every item in a sweep.
+
+    The translator is built even when the queue holds only free work, because the
+    queue is APPENDABLE — a translate can be added while a prepare sweep is running,
+    and constructing it here costs nothing until a call is actually made.
+    """
+    glossary = Glossary.load(cfg.paths.glossary_json)
+    try:
+        translator = Translator(cfg.anthropic, cfg.translation)
+    except Exception:  # noqa: BLE001 — a missing engine must not kill the queue
+        # Left as None. A translate task then REFUSES with a plain message rather than
+        # the whole job dying, and free tasks in the same queue still run.
+        translator = None
+    return task_mod.TaskContext(cfg=cfg, state=state, total=total,
+                                glossary=glossary, translator=translator)
+
+
 # ---- the worker --------------------------------------------------------------
+
+def _output_total(cfg: Config, chapters: list) -> int:
+    """The count the output filename's pad width is derived from.
+
+    Recomputed per item rather than captured once at job start. A re-paste or another
+    queued job can re-pad every file on disk while this worker runs, and a worker
+    holding the old count would write chapter-50.md beside an already-re-padded
+    chapter-050.md — two files for one chapter. See morning/chapter_files.py.
+    """
+    return output_total(Path(cfg.paths.output_dir), len(chapters))
+
 
 async def _run_worker(job: Job, cfg: Config) -> None:
     loop = asyncio.get_running_loop()
     state_path = Path(cfg.paths.state_file)
     state = State.load(state_path)
+    context = _build_context(job, cfg, state, 0)
 
     # Drain the queue. The awaits are run_in_threadpool and the rate-limit sleep, so an
     # enqueue arriving mid-flight is always observed on a later iteration — no lost
@@ -371,16 +464,25 @@ async def _run_worker(job: Job, cfg: Config) -> None:
                     "done": 0, "total": max(1, len(chapter.paragraphs)),
                     "started_at": time.time()}
         progress, flush = _build_progress(job, loop)
+        # The context is rebuilt per item so the task sees the worker's CURRENT state
+        # object — `_persist_item_state` returns a freshly merged one after each item,
+        # and handing a task the copy from before that merge would let it overwrite an
+        # edit the user made to another chapter while this sweep ran.
+        context.state = state
+        context.total = _output_total(cfg, chapters)
+        context.progress = progress
+        context.hooks = _build_stream_hooks(job, loop)
         job.publish({"type": "start", "index": index, "title": chapter.title,
                      "chars": chapter.metrics.char_count, "kind": kind,
                      "label": task_mod.describe(kind, index),
                      "units": len(chapter.paragraphs),
+                     "billed": kind in task_mod.BILLED_TASK_KINDS,
                      "started_at": job.live["started_at"],
                      "model": cfg.anthropic.model, "effort": cfg.anthropic.effort})
 
         try:
             result = await run_in_threadpool(
-                task_mod.run_task, kind, chapter, cfg, progress)
+                task_mod.run_task, kind, chapter, context)
         except TaskAborted:
             # A deliberate stop, not a failure. Leave an item that already had good
             # output marked as it was; only revert one that was genuinely unfinished.
@@ -467,9 +569,10 @@ async def _run_worker(job: Job, cfg: Config) -> None:
         flush()
         job.live = None
         strikes = 0
-        state.update(index, status=result.status, **result.fields)
-        if result.usage or result.cost_usd:
-            state.add_usage(index, result.usage, result.cost_usd)
+        if not result.state_written:
+            state.update(index, status=result.status, **result.fields)
+            if result.usage or result.cost_usd:
+                state.add_usage(index, result.usage, result.cost_usd)
         state = _persist_item_state(state, state_path, index)
         rec = state.get(index) or {}
         job.queued.discard(key)
