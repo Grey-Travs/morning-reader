@@ -172,7 +172,7 @@ developing; a reload would kill an in-flight job, so it is off by default).
 ## Tests
 
 ```bash
-.venv\Scripts\python.exe -m pytest tests/ -q     # 1068 tests
+.venv\Scripts\python.exe -m pytest tests/ -q     # 1074 tests
 cd web && npm test                                # 91 tests
 ```
 

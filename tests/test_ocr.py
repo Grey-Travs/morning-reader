@@ -360,3 +360,63 @@ def test_only_the_filename_is_sent_not_the_whole_path(tmp_path):
 
     assert "page-0001.jpg" in translator.calls[0]["user"]
     assert str(tmp_path) not in translator.calls[0]["user"]
+
+
+# ---- a rotated photograph ----------------------------------------------------
+# The worst failure the overlay can have, and the only one nothing else can see.
+#
+# morning/images.py reads dimensions out of the JPEG SOF / PNG IHDR — the UNROTATED
+# raster — while a browser renders a photo carrying an EXIF orientation flag rotated.
+# The stored 1600x2400 then describes something the reader shows as 2400x1600, so every
+# box is transposed onto the wrong art. No error, no warning, nothing on screen that
+# looks wrong to someone who does not read Japanese.
+#
+# The model is the only party that sees the image as the browser will, so its reported
+# size is worth exactly one thing: if it is the TRANSPOSE of the measured one, that is
+# what happened.
+
+def test_a_transposed_page_size_is_reported_as_a_probable_rotation():
+    page = ocr.parse_page_response(_answer(width=H, height=W), width=W, height=H)
+
+    assert page.meta.confidence == "low"
+    assert any("rotation" in note for note in page.meta.notes)
+
+
+def test_it_names_both_sizes_so_the_note_is_actionable():
+    page = ocr.parse_page_response(_answer(width=H, height=W), width=W, height=H)
+
+    note = next(n for n in page.meta.notes if "rotation" in n)
+    assert f"{W}x{H}" in note and f"{H}x{W}" in note
+
+
+def test_the_measured_size_still_wins_over_a_transposed_report():
+    """Detecting the rotation does NOT make the model's size authoritative. It is an
+    estimate from what it was shown, and a wrong page size rescales every box."""
+    page = ocr.parse_page_response(_answer(width=H, height=W), width=W, height=H)
+
+    assert (page.width, page.height) == (W, H)
+
+
+def test_an_ordinary_disagreement_is_not_a_rotation():
+    """A model that simply estimated the size badly must not trip this. Only the exact
+    transpose means what the note claims."""
+    page = ocr.parse_page_response(_answer(width=999, height=777), width=W, height=H)
+
+    assert page.meta.confidence != "low" or not any(
+        "rotation" in note for note in page.meta.notes)
+
+
+def test_a_square_page_is_never_called_rotated():
+    """A square image is its own transpose, so the signal carries no information and
+    firing on it would send every square page to a human for nothing."""
+    page = ocr.parse_page_response(_answer(width=1000, height=1000),
+                                   width=1000, height=1000)
+
+    assert not any("rotation" in note for note in page.meta.notes)
+
+
+def test_an_unmeasured_page_is_never_called_rotated():
+    """With nothing measured there is nothing to disagree with."""
+    page = ocr.parse_page_response(_answer(width=H, height=W), width=0, height=0)
+
+    assert not any("rotation" in note for note in page.meta.notes)

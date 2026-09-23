@@ -228,8 +228,24 @@ def parse_page_response(raw: str, *, width: int = 0, height: int = 0) -> PageRea
             return 0
 
     # Prefer the measured size; fall back to the model's only when there is none.
-    page_width = width or _int(data.get("width"))
-    page_height = height or _int(data.get("height"))
+    reported_width, reported_height = _int(data.get("width")), _int(data.get("height"))
+    page_width = width or reported_width
+    page_height = height or reported_height
+
+    # A phone photo can carry an EXIF orientation flag. `morning/images.py` reads the
+    # dimensions out of the JPEG SOF / PNG IHDR — the UNROTATED raster — while the
+    # browser renders the picture rotated, so a stored 1600x2400 describes something
+    # the reader shows as 2400x1600. Every box is then transposed onto the wrong art,
+    # with no error, and the owner does not read Japanese well enough to notice.
+    #
+    # The model is the only party that sees the image as the browser will, so its
+    # reported size is worth exactly one thing: if it is the TRANSPOSE of the measured
+    # one, that is what happened. Detecting it costs nothing and the page goes to a
+    # human rather than into the book.
+    rotated = bool(
+        width and height and reported_width and reported_height
+        and width != height
+        and (reported_width, reported_height) == (height, width))
 
     raw_regions = data.get("regions")
     regions = []
@@ -244,6 +260,15 @@ def parse_page_response(raw: str, *, width: int = 0, height: int = 0) -> PageRea
     meta_raw = meta_raw if isinstance(meta_raw, dict) else {}
     confidence = str(meta_raw.get("confidence") or "low").strip().lower()
     heading = meta_raw.get("heading")
+    notes = _as_notes(meta_raw.get("notes"))
+
+    if rotated:
+        notes.append(
+            f"this image is stored as {width}x{height} but reads as "
+            f"{reported_width}x{reported_height} — it probably carries a rotation "
+            f"flag, so anything positioned on it would land on the wrong part of the "
+            f"picture. Re-export it without one and read it again.")
+        confidence = "low"
 
     return PageRead(
         width=page_width,
@@ -255,7 +280,7 @@ def parse_page_response(raw: str, *, width: int = 0, height: int = 0) -> PageRea
             starts_mid_sentence=_as_bool(meta_raw.get("starts_mid_sentence")),
             ends_mid_sentence=_as_bool(meta_raw.get("ends_mid_sentence")),
             ends_mid_word=_as_bool(meta_raw.get("ends_mid_word")),
-            notes=_as_notes(meta_raw.get("notes")),
+            notes=notes,
         ),
     )
 
