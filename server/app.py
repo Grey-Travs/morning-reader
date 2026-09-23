@@ -1096,15 +1096,31 @@ def _require_chapter(pid: str, index: int) -> tuple[list, object]:
 def read_chapter_view(pid: str, index: int) -> dict:
     """One chapter as it should be read: the English, with its source beside it.
 
-    ``from_audit`` is the field that matters. A chapter that failed its checks has its
-    translation only in the audit copy, and showing that prose without saying so would
-    present un-reviewed work as finished — which is exactly the confusion the
+    Two fields carry the honesty of this screen.
+
+    ``from_audit`` says the English has NOT been accepted. A chapter that failed its
+    checks has its translation only in the audit copy, and showing that prose without
+    saying so would present un-reviewed work as finished — exactly the confusion the
     chapters/-versus-audit/ split exists to prevent.
+
+    ``stale`` says the English was made from DIFFERENT TEXT than the Japanese shown
+    beside it. Everything on disk is keyed by chapter INDEX — ``chapters/chapter-02.md``
+    and ``state.json``'s record ``"2"`` — while what index 2 MEANS comes from the
+    source snapshot. Re-paste a novel with a chapter removed, or delete a page and
+    rebuild a scanned one, and every later chapter shifts down by one: chapter 2 now
+    holds chapter 3's Japanese and chapter 2's English, and the record still says
+    "validated". The work page already computed this and the reader did not, so the one
+    screen where a person actually reads was the only one that did not say.
+
+    The English is still shown. It is real, it was paid for, and the owner may well
+    want it — what it must not do is look finished.
     """
     _, cfg = project_cfg(pid)
     chapters, chapter = _require_chapter(pid, index)
     total = output_total(Path(cfg.paths.output_dir), len(chapters))
     record = State.load(cfg.paths.state_file).get(index) or {}
+    stale = bool(record.get("source_hash")
+                 and record.get("source_hash") != chapter.metrics.content_hash)
 
     english = read_chapter(Path(cfg.paths.output_dir), index, total)
     from_audit = False
@@ -1121,6 +1137,9 @@ def read_chapter_view(pid: str, index: int) -> dict:
         "source": chapter.paragraphs,
         "status": record.get("status", ""),
         "from_audit": from_audit,
+        # The English on disk was made from different Japanese than the source shown
+        # beside it. See the docstring: this is what a renumbering looks like.
+        "stale": stale,
         "accepted": bool(record.get("accepted")),
         "failures": record.get("failures", []),
         "warnings": record.get("warnings", []),

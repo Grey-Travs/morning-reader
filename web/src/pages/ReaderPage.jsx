@@ -111,6 +111,21 @@ export default function ReaderPage() {
         </div>
       )}
 
+      {chapter.stale && (
+        <div className="card mb-6 p-4" style={{ borderColor: 'var(--warn)' }}>
+          <p className="font-medium" style={{ color: 'var(--warn)' }}>
+            This English was made from different text
+          </p>
+          <p className="mt-1 text-sm text-muted">
+            The Japanese below has changed since this was translated — which usually
+            means the source was re-pasted, or pages were added or removed and the
+            chapters renumbered. Everything is stored by chapter number, so this
+            chapter may be showing the previous chapter&rsquo;s translation. Translate
+            it again to be sure.
+          </p>
+        </div>
+      )}
+
       {chapter.from_audit && (
         <div className="card mb-6 p-4" style={{ borderColor: 'var(--warn)' }}>
           <p className="font-medium" style={{ color: 'var(--warn)' }}>

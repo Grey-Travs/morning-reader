@@ -331,3 +331,72 @@ def test_glossary_endpoints_404_on_an_unknown_project(client):
         response = (client.get(f"/api/projects/0123456789ab/{path}") if body is None
                     else client.post(f"/api/projects/0123456789ab/{path}", json=body))
         assert response.status_code == 404, path
+
+
+# ---- English that was made from different text --------------------------------
+# Everything on disk is keyed by chapter INDEX — chapters/chapter-02.md and
+# state.json's record "2" — while what index 2 MEANS comes from the source snapshot.
+# Re-paste a novel with a chapter removed, or delete a page and rebuild a scanned one,
+# and every later chapter shifts down by one: chapter 2 then holds chapter 3's Japanese
+# beside chapter 2's English, with the record still reading "validated".
+#
+# The work page already computed this. The reader — the one screen where a person
+# actually reads — did not, so it was the only place that did not say.
+
+def _state_record(pid, index, **fields):
+    from server.app import project_cfg
+    from server import jobs
+
+    cfg = project_cfg(pid)[1]
+    with jobs.mutate_state(cfg.paths.state_file) as state:
+        state.update(index, **fields)
+
+
+def test_a_chapter_whose_source_changed_says_so(client, sample_source):
+    pid = client.post("/api/projects/text",
+                      json={"title": "n", "text": sample_source}).json()["project"]["id"]
+
+    body = client.get(f"/api/projects/{pid}/read/1").json()
+    _state_record(pid, 1, status="validated", source_hash="a-hash-from-other-text")
+
+    body = client.get(f"/api/projects/{pid}/read/1").json()
+    assert body["stale"] is True
+
+
+def test_a_chapter_that_matches_its_source_does_not(client, sample_source):
+    from server.app import project_cfg
+    from server import projects as pj
+
+    pid = client.post("/api/projects/text",
+                      json={"title": "n", "text": sample_source}).json()["project"]["id"]
+    chapter = pj.load_source(pid)[0]
+    _state_record(pid, 1, status="validated",
+                  source_hash=chapter.metrics.content_hash)
+
+    assert client.get(f"/api/projects/{pid}/read/1").json()["stale"] is False
+
+
+def test_a_chapter_nobody_has_touched_is_not_stale(client, sample_source):
+    """No record means no claim about it — "stale" would be a claim."""
+    pid = client.post("/api/projects/text",
+                      json={"title": "n", "text": sample_source}).json()["project"]["id"]
+
+    assert client.get(f"/api/projects/{pid}/read/1").json()["stale"] is False
+
+
+def test_replacing_the_source_makes_every_shifted_chapter_stale(client, sample_source):
+    """The real sequence. Three chapters translated, the first removed, and now every
+    chapter's English belongs to the chapter before it."""
+    from server import projects as pj
+
+    pid = client.post("/api/projects/text",
+                      json={"title": "n", "text": sample_source}).json()["project"]["id"]
+    for chapter in pj.load_source(pid):
+        _state_record(pid, chapter.index, status="validated",
+                      source_hash=chapter.metrics.content_hash)
+
+    shortened = sample_source.split("第2話", 1)[1]
+    client.put(f"/api/projects/{pid}/source",
+               json={"text": "第2話" + shortened, "mode": "heading"})
+
+    assert client.get(f"/api/projects/{pid}/read/1").json()["stale"] is True
