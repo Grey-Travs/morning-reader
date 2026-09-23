@@ -32,7 +32,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from types import SimpleNamespace
+from pathlib import Path
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -250,21 +250,41 @@ class Translator:
         self.tcfg = tcfg
 
     # ---- the agent call ----------------------------------------------------
-    def _options(self, system_text: str, max_turns: int = 1) -> ClaudeAgentOptions:
+    def _options(self, system_text: str, max_turns: int = 1, *,
+                 tools: list[str] | None = None,
+                 cwd: str | Path | None = None,
+                 add_dirs: list[str | Path] | None = None) -> ClaudeAgentOptions:
+        """Build the call's options.
+
+        ``tools`` is what a SPECIFIC call opts into. Reading a page needs ``Read``,
+        because the only way to hand the agent an image is a path it opens off disk;
+        translating prose needs nothing and gets nothing. Anything not named here stays
+        blocked, so the default call is unchanged — text in, text out.
+
+        ``cwd``/``add_dirs`` scope that ``Read`` to one folder, so a call that can open
+        a file can only open the pages of the project it was given.
+        """
+        allowed = list(tools or [])
         return ClaudeAgentOptions(
             system_prompt=system_text,            # replaces the default agent prompt
-            allowed_tools=[],
-            disallowed_tools=list(_BLOCKED_TOOLS),
+            allowed_tools=allowed,
+            disallowed_tools=[t for t in _BLOCKED_TOOLS if t not in allowed],
             permission_mode="bypassPermissions",   # headless: never prompt
             setting_sources=[],                    # ignore project .claude/ config
             max_turns=max_turns,
             model=agent_model(self.cfg.model),
             effort=(self.cfg.effort if self.cfg.effort in _VALID_EFFORT else "high"),
             thinking={"type": "adaptive"} if self.cfg.thinking else {"type": "disabled"},
+            cwd=str(cwd) if cwd else None,
+            add_dirs=[str(d) for d in (add_dirs or [])],
         )
 
     async def _aquery(self, system_text: str, user_text: str, max_turns: int = 1,
-                      hooks: StreamHooks | None = None) -> tuple[str, dict, float]:
+                      hooks: StreamHooks | None = None, *,
+                      tools: list[str] | None = None,
+                      cwd: str | Path | None = None,
+                      add_dirs: list[str | Path] | None = None
+                      ) -> tuple[str, dict, float]:
         texts: list[str] = []
         usage: dict = {}
         cost = 0.0
@@ -272,8 +292,9 @@ class Translator:
         last_info = None   # the latest rate-limit info seen, including warnings
         got_result = False
 
-        async for message in query(prompt=user_text,
-                                   options=self._options(system_text, max_turns)):
+        options = self._options(system_text, max_turns, tools=tools, cwd=cwd,
+                                add_dirs=add_dirs)
+        async for message in query(prompt=user_text, options=options):
             # Cooperative stop. A threadpool thread cannot be killed, so the only way
             # to end an in-flight chapter is to check between messages and break out,
             # which closes the generator and tears the subprocess down.
@@ -321,13 +342,22 @@ class Translator:
         return "".join(texts).strip(), usage, cost
 
     def _call(self, system_text: str, user_text: str, max_turns: int = 1,
-              hooks: StreamHooks | None = None) -> tuple[str, dict, float]:
-        """One agent call -> (text, usage, cost). Blocking."""
+              hooks: StreamHooks | None = None, *,
+              tools: list[str] | None = None,
+              cwd: str | Path | None = None,
+              add_dirs: list[str | Path] | None = None) -> tuple[str, dict, float]:
+        """One agent call -> (text, usage, cost). Blocking.
+
+        ``tools``/``cwd``/``add_dirs`` let one call opt into a normally-blocked tool;
+        omitting them keeps every tool blocked.
+        """
         last: BaseException | None = None
         attempts = max(1, self.cfg.api_retry_count)
         for attempt in range(attempts):
             try:
-                return asyncio.run(self._aquery(system_text, user_text, max_turns, hooks))
+                return asyncio.run(self._aquery(
+                    system_text, user_text, max_turns, hooks,
+                    tools=tools, cwd=cwd, add_dirs=add_dirs))
             except (RateLimited, TranslatorError, CLINotFoundError, TaskAborted):
                 raise  # never retry a hard limit, a config error, or a deliberate stop
             except (CLIConnectionError, ProcessError) as exc:
