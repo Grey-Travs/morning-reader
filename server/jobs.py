@@ -41,7 +41,7 @@ from morning.glossary import Glossary
 from morning.state import STATUS_FAILED, STATUS_PENDING, State
 from morning.translator import StreamHooks, Translator
 
-from . import console, errors, projects as pj, tasks as task_mod
+from . import console, errors, pages as pages_mod, projects as pj, tasks as task_mod
 from .locks import file_lock
 
 # Live jobs, and which one owns each project. Module-level because there is one queue
@@ -402,6 +402,153 @@ def _build_context(job: Job, cfg: Config, state: State, total: int) -> task_mod.
 
 # ---- the worker --------------------------------------------------------------
 
+def _apply_page_result(pid: str, page_id: str, fields: dict) -> dict:
+    """Merge a finished read into pages.json and return the updated record.
+
+    Page spend is accumulated HERE rather than in state.json. That file is keyed by
+    CHAPTER index, and a page sequence number written into it would corrupt a real
+    chapter's totals — page 5 and chapter 5 both exist once a scanned work is built.
+    """
+    usage = fields.pop("_usage", {}) or {}
+    cost = float(fields.pop("_cost", 0.0) or 0.0)
+    with pages_mod.mutate_pages(pid) as doc:
+        record = pages_mod.find_page(doc, page_id)
+        if record is None:
+            return {}
+        record.update(fields)
+        totals = doc.setdefault("totals", {})
+        totals["cost_usd"] = round(float(totals.get("cost_usd") or 0.0) + cost, 6)
+        for key, value in usage.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                totals[key] = (totals.get(key) or 0) + value
+        return dict(record)
+
+
+def _set_page_status(pid: str, page_id: str, status: str, **fields) -> None:
+    with pages_mod.mutate_pages(pid) as doc:
+        pages_mod.set_status(doc, page_id, status, **fields)
+
+
+def release_queued_pages(pid: str, seqs: set[int]) -> None:
+    """Put pages whose work will now never run back to what they were resting at.
+
+    Without this they sit on "queued" or "reading" forever, and the default sweep —
+    which only picks up pages that have not been read — can never see them again.
+    """
+    if not seqs:
+        return
+    with pages_mod.mutate_pages(pid) as doc:
+        for page in doc.get("pages", []):
+            if page.get("seq") in seqs and page.get("status") in (
+                    pages_mod.STATUS_QUEUED, pages_mod.STATUS_RUNNING):
+                page["status"] = pages_mod.resting_status(page)
+
+
+async def _run_page_item(job: Job, context, cfg: Config, index: int, force: bool,
+                         kind: str, loop, strikes: int) -> tuple[int, str]:
+    """Run one queued PAGE item on the shared worker.
+
+    Pages ride the same Job as chapters so Stop, the live console, Activity and the
+    rate-limit auto-resume all work without being reimplemented — but their
+    bookkeeping lives in pages.json and ``index`` is a page SEQUENCE number, not a
+    chapter index.
+
+    Returns ``(strikes, outcome)`` where outcome is ``continue | break | return``.
+    """
+    key = task_mod.queue_key(index, kind)
+    doc = pages_mod.load_pages(job.pid)
+    page = pages_mod.find_by_seq(doc, index)
+    if page is None:
+        job.queued.discard(key)
+        job.current = None
+        return strikes, "continue"
+
+    page_id = str(page.get("id") or "")
+    # NOT page["status"] — that already reads "queued", because this item was marked
+    # when the work was accepted. Restoring it would leave the page queued forever.
+    resting = pages_mod.resting_status(page)
+    label = page.get("name") or f"Page {index}"
+
+    job.abort.clear()
+    job.live = {"index": index, "title": label, "chars": 0, "kind": kind,
+                "page_id": page_id, "done": 0, "total": 1,
+                "started_at": time.time()}
+    progress, flush = _build_progress(job, loop)
+    context.progress = progress
+    context.hooks = _build_stream_hooks(job, loop)
+    _set_page_status(job.pid, page_id, pages_mod.STATUS_RUNNING)
+    job.publish({"type": "start", "index": index, "title": label, "kind": kind,
+                 "label": task_mod.describe(kind, index), "page_id": page_id,
+                 "billed": kind in task_mod.BILLED_TASK_KINDS,
+                 "chars": 0, "units": 1, "started_at": job.live["started_at"],
+                 "model": cfg.anthropic.model, "effort": cfg.anthropic.effort})
+
+    def finished(status: str, **extra) -> None:
+        job.live = None
+        job.current = None
+        job.publish({"type": "item", "index": index, "kind": kind,
+                     "page_id": page_id, "title": label, "status": status, **extra})
+
+    try:
+        fields = await run_in_threadpool(task_mod.read_page_task, page, context)
+    except TaskAborted:
+        flush()
+        _set_page_status(job.pid, page_id, resting)
+        job.queued.discard(key)
+        finished(resting, aborted=True)
+        return strikes, ("break" if job.cancelled else "continue")
+    except RateLimited as exc:
+        flush()
+        job.live = None
+        # Nothing was written, so the page simply goes back to what it was and is
+        # re-queued at the head to be retried when the window refreshes.
+        _set_page_status(job.pid, page_id, resting)
+        job.put_back((index, force, kind))
+        job.current = None
+        strikes += 1
+        resume_at, resets_at = rate_limit_resume_at(exc, strikes)
+        if strikes >= _MAX_STRIKES:
+            job.done = True
+            job.publish({"type": "paused", "index": index, "message": str(exc),
+                         "resets_at": resets_at, "current": None,
+                         "pending": [i for i, _, _ in job.snapshot_pending()]})
+            return strikes, "return"
+        job.waiting = {"resume_at": resume_at, "resets_at": resets_at,
+                       "message": str(exc), "since": time.time()}
+        job.publish({"type": "waiting", "index": index, "message": str(exc),
+                     "resets_at": resets_at, "resume_at": resume_at})
+        await _sleep_until(job, resume_at)
+        job.waiting = None
+        if job.cancelled or not job.has_pending():
+            return strikes, "break"
+        job.publish({"type": "resumed"})
+        return strikes, "continue"
+    except TaskRefused as exc:
+        flush()
+        _set_page_status(job.pid, page_id, resting)
+        job.queued.discard(key)
+        finished(resting, refused=True, error=str(exc))
+        return 0, "continue"
+    except Exception as exc:  # isolation: one bad page never kills the queue
+        flush()
+        _set_page_status(job.pid, page_id, pages_mod.STATUS_FAILED,
+                         error=f"{type(exc).__name__}: {exc}")
+        job.queued.discard(key)
+        finished(pages_mod.STATUS_FAILED, error=str(exc),
+                 explain=errors.as_dict(errors.explain(exc)))
+        return 0, "continue"
+
+    flush()
+    record = _apply_page_result(job.pid, page_id, fields)
+    job.queued.discard(key)
+    read = record.get("read") or {}
+    finished(record.get("status", pages_mod.STATUS_NEEDS_CHECK),
+             regions=len(read.get("regions") or []),
+             confidence=(record.get("ocr") or {}).get("confidence", ""),
+             chars=len(pages_mod.page_text(record)))
+    return 0, "continue"
+
+
 def _output_total(cfg: Config, chapters: list) -> int:
     """The count the output filename's pad width is derived from.
 
@@ -431,6 +578,19 @@ async def _run_worker(job: Job, cfg: Config) -> None:
         job.current = index
         job.kind = kind
         key = task_mod.queue_key(index, kind)
+
+        # A page item's index is a page SEQUENCE number, so it must never be looked up
+        # in the chapter map below — after a build, page 5 and chapter 5 both exist and
+        # are different things.
+        if kind in task_mod.PAGE_TASK_KINDS:
+            context.pid = job.pid
+            strikes, outcome = await _run_page_item(
+                job, context, cfg, index, force, kind, loop, strikes)
+            if outcome == "return":
+                return
+            if outcome == "break":
+                break
+            continue
 
         # Re-read the source on EVERY item, not once at job start. The user can edit
         # or re-paste the source while a sweep runs, and a worker holding the copy it
@@ -612,9 +772,21 @@ async def _run_worker_guarded(job: Job, cfg: Config) -> None:
                      "status": STATUS_FAILED, "title": "", "error": str(exc),
                      "explain": errors.as_dict(explained)})
     finally:
+        # Capture the in-flight item BEFORE clearing it. When the worker dies partway
+        # through a page, that page is the ONE item not in the pending queue — so
+        # draining alone released everything except the page actually mid-flight,
+        # which then sat on "reading" forever.
+        in_flight = job.current if job.kind in task_mod.PAGE_TASK_KINDS else None
         job.live = None
         job.current = None
-        job.drain()
+        stranded = {i for i, _f, k in job.drain() if k in task_mod.PAGE_TASK_KINDS}
+        if in_flight is not None:
+            stranded.add(in_flight)
+        if stranded:
+            try:
+                release_queued_pages(job.pid, stranded)
+            except Exception:  # noqa: BLE001 — cleanup must not mask the real error
+                pass
         job.done = True
         if job.terminal is None:
             # A normal finish and the rate-limit give-up both publish their own
@@ -705,7 +877,12 @@ def cancel(pid: str, *, stop_current: bool = False) -> dict:
     if job is None:
         return {"ok": True, "current": None, "pending": [], "stopped": None}
 
-    job.drain()
+    dropped = {i for i, _f, k in job.drain() if k in task_mod.PAGE_TASK_KINDS}
+    if dropped:
+        try:
+            release_queued_pages(pid, dropped)
+        except Exception:  # noqa: BLE001 — a failed release must not fail the cancel
+            pass
     stopped = None
     if stop_current:
         stopped = job.current

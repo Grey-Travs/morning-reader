@@ -28,30 +28,34 @@ from morning.state import (
     STATUS_EMPTY, STATUS_ENGLISH, STATUS_PREPARED, State,
 )
 from morning.translator import StreamHooks, Translator
+from morning import ocr
+
+from . import pages
 
 # ---- task kinds --------------------------------------------------------------
 TASK_PREPARE = "prepare"      # segment, measure and classify one chapter — no model call
 TASK_TRANSLATE = "translate"  # translate, validate, retry, record
-TASK_KINDS = (TASK_PREPARE, TASK_TRANSLATE)
+TASK_READ_PAGE = "read-page"  # read one scanned page into regions
+TASK_KINDS = (TASK_PREPARE, TASK_TRANSLATE, TASK_READ_PAGE)
 
 # Kinds that COST MONEY. The UI warns before starting one of these, and the terminal
 # reports the model and effort that will be used. Kept as a list rather than inferred
 # so a future free task cannot accidentally inherit the warning, or a paid one escape it.
-BILLED_TASK_KINDS = (TASK_TRANSLATE,)
+BILLED_TASK_KINDS = (TASK_TRANSLATE, TASK_READ_PAGE)
 
 # Kinds whose index is a PAGE sequence number rather than a chapter index.
 #
-# Empty until step 3 and deliberately not deleted. Pages and chapters share one worker
-# but NOT one number space: once a scanned work has been built, page 5 and chapter 5
-# both exist and are different things. The dedup key is namespaced against exactly
-# this, and Night Reader shipped the bug first — a duplicate guard keyed on the bare
-# index made queueing a page silently drop a chapter.
-PAGE_TASK_KINDS: tuple[str, ...] = ()
+# Pages and chapters share one worker but NOT one number space: once a scanned work
+# has been built, page 5 and chapter 5 both exist and are different things. The dedup
+# key is namespaced against exactly this, and Night Reader shipped the bug first — a
+# duplicate guard keyed on the bare index made queueing a page silently drop a chapter.
+PAGE_TASK_KINDS: tuple[str, ...] = (TASK_READ_PAGE,)
 
 # How each kind is described in the UI and the terminal.
 TASK_LABEL = {
     TASK_PREPARE: "Preparing",
     TASK_TRANSLATE: "Translating",
+    TASK_READ_PAGE: "Reading page",
 }
 
 
@@ -125,6 +129,9 @@ class TaskContext:
     cfg: Config
     state: State
     total: int
+    # Needed by the page tasks, whose state lives in the project's own manifest
+    # rather than in state.json — see server/pages.py for why the two are separate.
+    pid: str = ""
     glossary: Glossary = field(default_factory=Glossary)
     translator: Translator | None = None
     progress: Progress = field(default_factory=Progress)
@@ -235,6 +242,51 @@ def translate_chapter(chapter: Chapter, ctx: TaskContext) -> TaskResult:
     )
 
 
+# ---- reading a page ----------------------------------------------------------
+
+def read_page_task(page: dict, ctx: TaskContext) -> dict:
+    """Read one scanned page into regions.
+
+    Returns the fields to merge into the page's record in ``pages.json`` — NOT a
+    TaskResult, because a page's bookkeeping lives in its own manifest. state.json is
+    keyed by chapter index, and a page sequence number written there would corrupt a
+    real chapter's totals.
+    """
+    if ctx.translator is None:
+        raise TaskRefused("the page reader is not available")
+
+    image = pages.resolve_page_file(ctx.pid, str(page.get("id") or ""))
+    if image is None:
+        # Refused, not failed: the manifest and the folder disagree, which is a
+        # storage problem rather than a bad page.
+        raise TaskRefused("that page's image file is missing")
+
+    ctx.progress.check()
+    read = ocr.read_page(
+        ctx.translator, image,
+        width=int(page.get("width") or 0), height=int(page.get("height") or 0),
+        hint=str(page.get("hint") or ""), hooks=ctx.hooks)
+
+    attempts = int(((page.get("ocr") or {}).get("attempts") or 0)) + 1
+    return {
+        "read": read.to_dict(),
+        # A page the model itself was unsure about goes to a human, not straight into
+        # the novel. Everything else is provisionally fine.
+        "status": (pages.STATUS_OK if read.meta.confidence == "high"
+                   else pages.STATUS_NEEDS_CHECK),
+        # Cleared: whatever the note said, it has now been acted on, and leaving it
+        # would send the same hint again on every later re-read.
+        "hint": "",
+        "error": None,
+        "ocr": {"at": pages.now_iso(), "attempts": attempts,
+                "confidence": read.meta.confidence,
+                "regions": len(read.regions),
+                "usage": read.usage, "cost_usd": read.cost_usd},
+        "_usage": read.usage,
+        "_cost": read.cost_usd,
+    }
+
+
 # ---- dispatch ----------------------------------------------------------------
 
 _REGISTRY: dict[str, Callable[[Chapter, TaskContext], TaskResult]] = {
@@ -244,7 +296,12 @@ _REGISTRY: dict[str, Callable[[Chapter, TaskContext], TaskResult]] = {
 
 
 def run_task(kind: str, chapter: Chapter, ctx: TaskContext) -> TaskResult:
-    """Run one queued item. Blocking — always called via ``run_in_threadpool``."""
+    """Run one queued CHAPTER item. Blocking — always via ``run_in_threadpool``.
+
+    Page items do not come through here: their index is a page sequence number and
+    their state lives in a different file, so the worker routes them to
+    ``read_page_task`` instead.
+    """
     handler = _REGISTRY.get(kind)
     if handler is None:
         # An unknown kind is refused rather than failed: nothing was written and

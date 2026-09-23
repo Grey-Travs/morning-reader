@@ -34,6 +34,8 @@ from morning.chapter_files import (
 )
 from morning.chapters import classify
 from morning.config import Config
+from morning.images import MAX_IMAGE_BYTES, inspect, unsupported_reason
+from morning.page_build import assemble, propose_join
 from morning.glossary import (
     VALID_TYPES, Glossary, GlossaryEntry, glossary_lock, load_pending, save_pending,
 )
@@ -41,7 +43,7 @@ from morning.pipeline import accept_chapter
 from morning.state import State
 from morning.textsource import decode_upload, split_text_into_chapters
 
-from . import errors, jobs, projects as pj, tasks as task_mod
+from . import errors, jobs, pages as pages_mod, projects as pj, tasks as task_mod
 from .locks import file_lock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -428,6 +430,260 @@ async def refresh_source(pid: str) -> dict:
     pj.save_source(pid, chapters)
     pj.set_chapter_count(pid, len(chapters))
     return {"chapters": len(chapters)}
+
+
+# ---- scanned pages -----------------------------------------------------------
+
+@app.get("/api/projects/{pid}/pages")
+def list_pages(pid: str) -> dict:
+    require_project(pid)
+    doc = pages_mod.load_pages(pid)
+    rows = []
+    for page in doc.get("pages", []):
+        read = page.get("read") or {}
+        rows.append({
+            "id": page.get("id"), "seq": page.get("seq"), "name": page.get("name"),
+            "status": page.get("status"), "width": page.get("width"),
+            "height": page.get("height"), "bytes": page.get("bytes"),
+            "batch": page.get("batch"), "error": page.get("error"),
+            "hint": page.get("hint", ""),
+            "join_prev": page.get("join_prev", ""),
+            "join_glue": page.get("join_glue", "none"),
+            "join_prev_source": page.get("join_prev_source", ""),
+            "join_reason": page.get("join_reason", ""),
+            "regions": len(read.get("regions") or []),
+            "confidence": (page.get("ocr") or {}).get("confidence", ""),
+            "chars": pages_mod.page_chars(page),
+        })
+    return {"pages": rows, "summary": pages_mod.summary(doc)}
+
+
+@app.get("/api/projects/{pid}/pages/{page_id}")
+def get_page(pid: str, page_id: str) -> dict:
+    """One page in full, including its regions — what the overlay reader draws."""
+    require_project(pid)
+    page = pages_mod.find_page(pages_mod.load_pages(pid), page_id)
+    if page is None:
+        raise HTTPException(404, "There is no page with that id in this project.")
+    return {"page": page, "text": pages_mod.page_text(page)}
+
+
+@app.get("/api/projects/{pid}/pages/{page_id}/image")
+def get_page_image(pid: str, page_id: str):
+    """The image itself. Resolved through the MANIFEST — a URL segment never becomes
+    a path component."""
+    require_project(pid)
+    path = pages_mod.resolve_page_file(pid, page_id)
+    if path is None:
+        raise HTTPException(404, "That page's image is not on disk.")
+    return FileResponse(str(path))
+
+
+@app.post("/api/projects/{pid}/pages")
+async def upload_pages(pid: str, files: list[UploadFile],
+                       label: str = "") -> dict:
+    """Add page images.
+
+    Every file is identified and measured from its own BYTES — the content type is
+    advisory and the filename is a guess. A file already in this project is reported
+    as a duplicate rather than stored twice: re-uploading a folder is ordinary, and
+    paying to read the same page again is not.
+    """
+    require_project(pid)
+    added, duplicates, rejected = [], [], []
+
+    with pages_mod.mutate_pages(pid) as doc:
+        if len(doc.get("pages", [])) + len(files) > pages_mod.MAX_PAGES_PER_PROJECT:
+            raise HTTPException(413, f"That would take this project past "
+                                     f"{pages_mod.MAX_PAGES_PER_PROJECT} pages.")
+        batch = pages_mod.new_batch(doc, label)
+        folder = pages_mod.pages_dir(pid)
+        folder.mkdir(parents=True, exist_ok=True)
+
+        for upload in files:
+            data = await upload.read()
+            name = upload.filename or ""
+            if len(data) > MAX_IMAGE_BYTES:
+                rejected.append({"name": name, "reason": "That image is larger than "
+                                                         "Morning Reader accepts."})
+                continue
+            info = inspect(data)
+            if not info.ok:
+                rejected.append({"name": name,
+                                 "reason": unsupported_reason(data[:64])})
+                continue
+            digest = pages_mod.sha256_of(data)
+            existing = pages_mod.find_by_hash(doc, digest)
+            if existing is not None:
+                duplicates.append({"name": name, "seq": existing.get("seq")})
+                continue
+            page = pages_mod.add_page(doc, info=info, data_len=len(data),
+                                      digest=digest, batch=batch, name=name)
+            (folder / page["file"]).write_bytes(data)
+            added.append({"id": page["id"], "seq": page["seq"],
+                          "measured": info.measured})
+
+    return {"added": added, "duplicates": duplicates, "rejected": rejected}
+
+
+class PageSelection(BaseModel):
+    ids: list[str] | None = None   # None = every page that still needs it
+    force: bool = False
+
+
+@app.post("/api/projects/{pid}/pages/read")
+async def read_pages(pid: str, req: PageSelection = PageSelection()) -> dict:
+    """Queue pages for reading. Must be async: starting a worker schedules a task."""
+    _, cfg = project_cfg(pid)
+    doc = pages_mod.load_pages(pid)
+    wanted = set(req.ids or [])
+
+    seqs: list[int] = []
+    for page in doc.get("pages", []):
+        if page.get("status") == pages_mod.STATUS_SKIPPED:
+            continue
+        if wanted:
+            if str(page.get("id")) in wanted:
+                seqs.append(int(page.get("seq")))
+            continue
+        # A sweep takes only pages that have never been read. Re-reading one that has
+        # been is what `force` is for, and doing it by default would re-bill the lot.
+        if req.force or not page.get("read"):
+            seqs.append(int(page.get("seq")))
+
+    if not seqs:
+        return {"queued": [], "job_id": None}
+
+    with pages_mod.mutate_pages(pid) as fresh:
+        for seq in seqs:
+            page = pages_mod.find_by_seq(fresh, seq)
+            if page is not None:
+                pages_mod.set_status(fresh, page["id"], pages_mod.STATUS_QUEUED)
+
+    items = [(seq, req.force, task_mod.TASK_READ_PAGE) for seq in seqs]
+    return jobs.enqueue(pid, cfg, items)
+
+
+class ReorderRequest(BaseModel):
+    ids: list[str]
+
+
+@app.post("/api/projects/{pid}/pages/reorder")
+def reorder_pages(pid: str, req: ReorderRequest) -> dict:
+    require_project(pid)
+    with pages_mod.mutate_pages(pid) as doc:
+        if not pages_mod.reorder(doc, req.ids):
+            raise HTTPException(400, "That ordering does not list every page exactly "
+                                     "once, so it was not applied.")
+    return {"ok": True}
+
+
+@app.post("/api/projects/{pid}/pages/delete")
+def delete_pages(pid: str, req: ReorderRequest) -> dict:
+    require_project(pid)
+    if jobs.active_job(pid) is not None:
+        raise HTTPException(409, "Something is still running on this project. Stop it "
+                                 "first, then delete pages.")
+    with pages_mod.mutate_pages(pid) as doc:
+        removed = pages_mod.delete_pages(doc, req.ids)
+    for page in removed:
+        try:
+            (pages_mod.pages_dir(pid) / str(page.get("file"))).unlink()
+        except OSError:
+            pass  # the manifest is the record; a missing file is not a failure
+    return {"removed": len(removed)}
+
+
+class JoinRequest(BaseModel):
+    kind: str
+    glue: str = "none"
+
+
+@app.post("/api/projects/{pid}/pages/{page_id}/join")
+def set_page_join(pid: str, page_id: str, req: JoinRequest) -> dict:
+    """Record how this page follows the previous one, as a HUMAN decision.
+
+    Marked as theirs, and never revisited by a later read — see
+    ``server.pages.set_join``.
+    """
+    require_project(pid)
+    with pages_mod.mutate_pages(pid) as doc:
+        page = pages_mod.find_page(doc, page_id)
+        if page is None:
+            raise HTTPException(404, "There is no page with that id in this project.")
+        if not pages_mod.set_join(page, req.kind, glue=req.glue,
+                                  reason="you decided", by_user=True):
+            raise HTTPException(400, f"{req.kind!r} is not a way pages can join.")
+    return {"ok": True}
+
+
+class PageStatusRequest(BaseModel):
+    status: str
+
+
+@app.post("/api/projects/{pid}/pages/{page_id}/status")
+def set_page_status(pid: str, page_id: str, req: PageStatusRequest) -> dict:
+    """Mark a page as checked, or as not part of the text at all."""
+    require_project(pid)
+    if req.status not in (pages_mod.STATUS_EDITED, pages_mod.STATUS_OK,
+                          pages_mod.STATUS_SKIPPED, pages_mod.STATUS_NEW):
+        raise HTTPException(400, f"A page cannot be set to {req.status!r}.")
+    with pages_mod.mutate_pages(pid) as doc:
+        if pages_mod.set_status(doc, page_id, req.status) is None:
+            raise HTTPException(404, "There is no page with that id in this project.")
+    return {"status": req.status}
+
+
+@app.post("/api/projects/{pid}/pages/propose-joins")
+def propose_joins(pid: str) -> dict:
+    """Work out how each page follows the one before it.
+
+    A proposal, and labelled as one. A page whose seam a human has already decided is
+    left alone — ``set_join`` refuses to overwrite it.
+    """
+    require_project(pid)
+    proposed = 0
+    with pages_mod.mutate_pages(pid) as doc:
+        usable = [p for p in doc.get("pages", [])
+                  if p.get("status") in pages_mod.APPROVED_STATUSES]
+        for previous, following in zip(usable, usable[1:]):
+            join = propose_join(pages_mod.page_text(previous),
+                                pages_mod.page_text(following), previous, following)
+            if pages_mod.set_join(following, join.kind, glue=join.glue,
+                                  reason=join.reason):
+                proposed += 1
+    return {"proposed": proposed}
+
+
+@app.post("/api/projects/{pid}/pages/build")
+def build_from_pages(pid: str) -> dict:
+    """Turn the read pages into this project's chapters.
+
+    After this the project is an ordinary one — nothing downstream can tell it was
+    ever a stack of photographs.
+    """
+    project, _cfg = project_cfg(pid)
+    if jobs.active_job(pid) is not None:
+        raise HTTPException(409, "Something is still running on this project. Stop it "
+                                 "first, then build.")
+    doc = pages_mod.load_pages(pid)
+    usable = [p for p in doc.get("pages", [])
+              if p.get("status") in pages_mod.APPROVED_STATUSES]
+    if not usable:
+        raise HTTPException(400, "No pages are ready yet. Read them first, and check "
+                                 "any the reader was unsure about.")
+
+    built = assemble(usable, text_of=pages_mod.page_text)
+    if not built.chapters:
+        raise HTTPException(400, "Those pages produced no text to build from.")
+
+    pj.save_source(pid, built.chapters)
+    pj.set_chapter_count(pid, len(built.chapters))
+    with pages_mod.mutate_pages(pid) as fresh:
+        fresh["build"] = {"at": pages_mod.now_iso(), "chapters": len(built.chapters),
+                          "pages": built.pages_used, "warnings": built.warnings}
+    return {"chapters": len(built.chapters), "pages_used": built.pages_used,
+            "warnings": built.warnings}
 
 
 # ---- reading -----------------------------------------------------------------
