@@ -1,8 +1,16 @@
 """Drives the Claude Code CLI to translate a chapter.
 
-Text in, text out. Every tool is blocked — this call has no business reading a file,
-running a command or reaching the network, and the block list is explicit rather than
-implied so that adding a tool is a visible decision.
+Text in, text out. This call has no business reading a file, running a command or
+reaching the network, so it is given NO tools and every request is denied by default.
+
+That default matters more than the block list beside it. The guard used to be an
+eleven-name ``disallowed_tools`` paired with ``permission_mode="bypassPermissions"``,
+which auto-approves everything else — so any tool the CLI gained that nobody thought
+to add was available and pre-approved, on a call whose input is a novel's source text
+or the art on a scanned page. A deny-list cannot be made safe by lengthening it,
+because what it has to exclude is "whatever ships next". ``_permission_gate`` inverts
+it: nothing is permitted unless this call named it, and the list remains only as a
+second layer.
 
 Three things here are subtle and each exists because of a specific failure:
 
@@ -37,6 +45,8 @@ from pathlib import Path
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    PermissionResultAllow,
+    PermissionResultDeny,
     CLIConnectionError,
     CLINotFoundError,
     ProcessError,
@@ -57,10 +67,42 @@ from .sanitize import strip_meta
 _VALID_EFFORT = {"low", "medium", "high", "xhigh", "max"}
 
 # Tools the agent must never reach for. Translation is text in, text out.
+#
+# This list is a SECOND layer, not the guard. It names what exists today, and a
+# deny-list can only ever name what its author knew about — the CLI's built-in tool
+# set is not pinned by this app and grows between releases. The guard is
+# ``_permission_gate`` below, which denies by DEFAULT.
 _BLOCKED_TOOLS = [
     "Bash", "Read", "Write", "Edit", "Glob", "Grep",
     "WebSearch", "WebFetch", "NotebookEdit", "TodoWrite", "Task",
 ]
+
+
+def _permission_gate(allowed: frozenset[str]):
+    """Deny every tool this call did not explicitly ask for.
+
+    The audit found the real shape of the old guard: ``disallowed_tools`` is a list of
+    eleven names, and it was paired with ``permission_mode="bypassPermissions"``, which
+    auto-approves everything else. Any tool the CLI gained that nobody thought to add
+    to the list was therefore available AND pre-approved, on a call whose input is
+    attacker-authorable content — the source text of a novel, or the art on a page.
+
+    A deny-list cannot be made safe by lengthening it, because the thing it must
+    exclude is "whatever ships next". So the default flips: nothing is permitted unless
+    this call named it. Translation names nothing at all; a page read names ``Read``,
+    scoped by ``cwd``/``add_dirs`` to that project's own folder.
+
+    ``interrupt`` is deliberately False. A denial should stop the tool, not destroy the
+    chapter: a model that reaches for something and is refused can still finish the
+    prose it was asked for, and ``max_turns`` bounds any attempt to keep trying.
+    """
+    async def can_use_tool(tool_name: str, _input: dict, _context) -> object:
+        if tool_name in allowed:
+            return PermissionResultAllow()
+        return PermissionResultDeny(
+            message=f"{tool_name} is not available to this call.", interrupt=False)
+
+    return can_use_tool
 
 # Appended when a chapter is retried after failing its fidelity check.
 RETRY_REMINDER = (
@@ -267,9 +309,19 @@ class Translator:
         allowed = list(tools or [])
         return ClaudeAgentOptions(
             system_prompt=system_text,            # replaces the default agent prompt
-            allowed_tools=allowed,
+            # EMPTY on purpose, even when this call wants a tool. A name in
+            # `allowed_tools` is pre-approved and the permission gate is never
+            # consulted for it, so putting `Read` here would hide the one tool this
+            # app actually hands out from the thing that is supposed to be deciding.
+            # The gate allows it instead.
+            allowed_tools=[],
             disallowed_tools=[t for t in _BLOCKED_TOOLS if t not in allowed],
-            permission_mode="bypassPermissions",   # headless: never prompt
+            # DEFAULT, not bypassPermissions. The SDK will not invoke `can_use_tool`
+            # under bypass — it says so itself — so bypass plus a callback is a guard
+            # that looks present and does nothing. With a callback supplied, prompts
+            # are answered over stdio rather than by a human, so nothing hangs.
+            permission_mode="default",
+            can_use_tool=_permission_gate(frozenset(allowed)),
             setting_sources=[],                    # ignore project .claude/ config
             max_turns=max_turns,
             model=agent_model(self.cfg.model),

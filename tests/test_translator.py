@@ -492,3 +492,94 @@ def test_a_broken_hook_never_fails_a_translation(monkeypatch):
         hooks=StreamHooks(on_text=boom, on_source=boom, on_chunk=boom))
 
     assert result.english == EN_A
+
+
+# ---- tools are denied by DEFAULT ----------------------------------------------
+# The guard used to be an eleven-name `disallowed_tools` paired with
+# `permission_mode="bypassPermissions"`, which auto-approves everything else. So a tool
+# the CLI gained that nobody thought to add to the list was available AND pre-approved,
+# on a call whose input is a novel's source text or the art on a scanned page.
+#
+# A deny-list cannot be made safe by lengthening it: what it has to exclude is
+# "whatever ships next". These pin the inversion.
+
+def _gate(tools=None):
+    options = _translator()._options("system", 1, tools=tools,
+                                     cwd=None, add_dirs=None)
+    return options, options.can_use_tool
+
+
+def _decide(gate, name):
+    import asyncio
+
+    return asyncio.run(gate(name, {}, None)).behavior
+
+
+def test_a_translation_call_is_given_no_tools_at_all():
+    options, _gate_fn = _gate()
+    assert options.allowed_tools == []
+
+
+def test_the_permission_callback_is_actually_consulted():
+    """The SDK does not invoke `can_use_tool` under `bypassPermissions` — it says so
+    itself. Bypass plus a callback is a guard that looks present and does nothing."""
+    options, gate = _gate()
+
+    assert options.permission_mode != "bypassPermissions"
+    assert gate is not None
+
+
+@pytest.mark.parametrize("tool", ["Bash", "Read", "Write", "WebFetch", "Task"])
+def test_every_known_tool_is_denied_to_a_translation(tool):
+    _options, gate = _gate()
+    assert _decide(gate, tool) == "deny"
+
+
+@pytest.mark.parametrize("tool", ["Artifact", "Workflow", "CronCreate", "Monitor",
+                                  "SomethingInventedNextRelease"])
+def test_a_tool_nobody_deny_listed_is_denied_too(tool):
+    """The whole point. None of these appear in _BLOCKED_TOOLS, and under the old
+    guard every one of them was available and auto-approved."""
+    from morning.translator import _BLOCKED_TOOLS
+
+    assert tool not in _BLOCKED_TOOLS
+    _options, gate = _gate()
+    assert _decide(gate, tool) == "deny"
+
+
+def test_a_page_read_may_use_read_and_nothing_else():
+    """The one tool this app hands out, scoped by cwd/add_dirs to the project's own
+    pages folder."""
+    options = _translator()._options("system", 4, tools=["Read"],
+                                  cwd=".", add_dirs=["."])
+
+    assert _decide(options.can_use_tool, "Read") == "allow"
+    for other in ("Bash", "Write", "WebFetch", "Artifact"):
+        assert _decide(options.can_use_tool, other) == "deny"
+
+
+def test_the_granted_tool_is_not_pre_approved_behind_the_gate():
+    """A name in `allowed_tools` is auto-approved and the callback is never consulted
+    for it — which would hide the one tool this app grants from the thing that is
+    supposed to be deciding about it."""
+    options = _translator()._options("system", 4, tools=["Read"],
+                                  cwd=".", add_dirs=["."])
+
+    assert options.allowed_tools == []
+
+
+def test_a_denial_does_not_destroy_the_chapter():
+    """A model that reaches for a tool and is refused can still finish the prose it was
+    asked for. Interrupting would turn a stray attempt into a failed, billed chapter."""
+    import asyncio
+
+    _options, gate = _gate()
+    assert asyncio.run(gate("Bash", {}, None)).interrupt is False
+
+
+def test_the_deny_list_is_still_there_as_a_second_layer():
+    from morning.translator import _BLOCKED_TOOLS
+
+    options, _gate_fn = _gate()
+    for tool in _BLOCKED_TOOLS:
+        assert tool in options.disallowed_tools
