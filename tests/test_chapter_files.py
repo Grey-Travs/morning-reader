@@ -277,3 +277,64 @@ def test_an_audit_without_the_heading_reads_as_none(tmp_path):
 def test_the_heading_is_the_one_the_reader_looks_for():
     """Changing it orphans every needs-review chapter already on disk."""
     assert AUDIT_TRANSLATION_HEADING == "## Translation (English)"
+
+
+# ---- the audit copy is the only copy --------------------------------------------
+# A chapter that fails its checks is written ONLY to audit/. That file IS the
+# translation: it is what the reader shows and what Accept promotes. `needs-review` is
+# not in DONE_STATUSES, so an ordinary "Translate everything" re-queues it
+# automatically — and the re-run used to overwrite the paid-for attempt with nothing
+# kept and nothing to offer.
+
+def _audit_chapter(text="Some Japanese."):
+    from morning.chapters import Chapter
+
+    return Chapter(index=1, title="第1話", paragraphs=[text])
+
+
+def test_rewriting_an_audit_copy_keeps_the_one_it_replaced(tmp_path):
+    from morning.chapter_files import (
+        has_previous_audit, read_audit_translation, read_previous_audit, write_audit,
+    )
+
+    audit = tmp_path / "audit"
+    write_audit(audit, 1, 1, chapter=_audit_chapter(), english="The first attempt.")
+    write_audit(audit, 1, 1, chapter=_audit_chapter(), english="The second attempt.")
+
+    assert read_audit_translation(audit, 1, 1) == "The second attempt."
+    assert has_previous_audit(audit, 1, 1)
+    assert read_previous_audit(audit, 1, 1) == "The first attempt."
+
+
+def test_the_first_write_has_nothing_to_keep(tmp_path):
+    from morning.chapter_files import has_previous_audit, write_audit
+
+    audit = tmp_path / "audit"
+    write_audit(audit, 1, 1, chapter=_audit_chapter(), english="Only attempt.")
+
+    assert not has_previous_audit(audit, 1, 1)
+
+
+def test_the_snapshot_lives_outside_audit(tmp_path):
+    """Everything that scans audit/ globs chapter-*.md. A snapshot kept inside it
+    would be picked up as a chapter of its own."""
+    from morning.chapter_files import write_audit
+
+    audit = tmp_path / "audit"
+    write_audit(audit, 1, 1, chapter=_audit_chapter(), english="one")
+    write_audit(audit, 1, 1, chapter=_audit_chapter(), english="two")
+
+    assert sorted(p.name for p in audit.glob("chapter-*.md")) == ["chapter-01.md"]
+    assert (tmp_path / "previous-audit" / "chapter-01.md").exists()
+
+
+def test_a_replaced_audit_copy_is_found_by_index_not_by_width(tmp_path):
+    """The same rule as everywhere else here: a snapshot taken when the work had a
+    different chapter count carries THAT width."""
+    from morning.chapter_files import has_previous_audit, write_audit
+
+    audit = tmp_path / "audit"
+    write_audit(audit, 7, 9, chapter=_audit_chapter(), english="one")     # chapter-07
+    write_audit(audit, 7, 9, chapter=_audit_chapter(), english="two")
+
+    assert has_previous_audit(audit, 7, 120)   # now a 3-digit work

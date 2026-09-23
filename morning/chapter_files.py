@@ -160,6 +160,14 @@ def write_audit(audit_dir: Path, index: int, total: int, *, chapter: Chapter,
     """
     audit_dir.mkdir(parents=True, exist_ok=True)
     path = audit_dir / chapter_filename(index, total)
+    # Snapshot first, for the same reason `write_chapter_file` does — except the stakes
+    # here are higher, not lower. A chapter that fails its checks is written ONLY to
+    # audit/, so this file IS the translation: it is what the reader shows and what
+    # Accept promotes. `needs-review` is not in DONE_STATUSES, so an ordinary
+    # "Translate everything" re-queues it automatically and the re-run lands right
+    # here — overwriting a paid-for attempt the owner may have preferred, with nothing
+    # kept and nothing to offer them.
+    _snapshot_audit(audit_dir, path)
     parts = [f"# {chapter.title}", ""]
     if notes:
         parts.append("## Notes")
@@ -170,6 +178,47 @@ def write_audit(audit_dir: Path, index: int, total: int, *, chapter: Chapter,
     with file_lock(path):
         atomic_write_text(path, "\n".join(parts))
     return path
+
+
+def previous_audit_dir(audit_dir: Path) -> Path:
+    """Where a replaced audit copy is kept.
+
+    A sibling of audit/, never inside it: everything that scans audit/ globs
+    ``chapter-*.md``, and a snapshot living there would be picked up as a chapter.
+    """
+    return Path(audit_dir).parent / "previous-audit"
+
+
+def _snapshot_audit(audit_dir: Path, path: Path) -> None:
+    if not path.exists():
+        return
+    keep = previous_audit_dir(audit_dir)
+    try:
+        keep.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, keep / path.name)
+    except OSError:
+        # A missing backup must never block writing the real translation.
+        pass
+
+
+def has_previous_audit(audit_dir: Path, index: int, total: int) -> bool:
+    """Whether a replaced audit copy is available to offer."""
+    return chapter_path(previous_audit_dir(Path(audit_dir)), index, total).exists()
+
+
+def read_previous_audit(audit_dir: Path, index: int, total: int) -> str | None:
+    """The prose from the replaced audit copy, by INDEX like everything else."""
+    path = chapter_path(previous_audit_dir(Path(audit_dir)), index, total)
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    marker = text.find(AUDIT_TRANSLATION_HEADING)
+    if marker == -1:
+        return None
+    return (text[marker + len(AUDIT_TRANSLATION_HEADING):].strip()) or None
 
 
 def read_audit_translation(audit_dir: Path, index: int, total: int) -> str | None:

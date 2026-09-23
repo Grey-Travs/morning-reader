@@ -234,7 +234,7 @@ class TestLineCounts:
     def test_an_untranslated_page_counts_its_lines_and_nothing_else(self):
         counts = pages_mod.line_counts(self._page())
         assert counts == {"lines": 2, "translated": 0, "stale": 0,
-                          "untranslated": 2, "undrawable": 0}
+                          "untranslated": 2, "undrawable": 0, "other": 0}
 
     def test_a_translated_line_counts_when_its_hash_still_matches(self):
         record = self._page()
@@ -348,3 +348,54 @@ class TestTheManifest:
             json.dumps({"pages": [], "chapters": bad}), encoding="utf-8")
 
         assert pages_mod.load_pages("abc")["chapters"] == []
+
+
+# ---- regions that carry text but are not translated ---------------------------
+# `ocr._region_from` coerces any kind it does not recognise to `body`, and the page
+# prompt also offers `caption`, `note` and `heading` as ordinary labels — `caption` is
+# literally "text attached to an illustration", which describes every manga narration
+# box. None of those are in TRANSLATED_KINDS, so they were dropped everywhere: not
+# counted, not shown, and a page made only of them reported `lines: 0` and had the
+# reader print "Nothing is said on this page" over a page covered in Japanese.
+
+class TestRegionsThatAreNotTranslated:
+    def test_they_are_counted_rather_than_ignored(self):
+        from morning.pageread import KIND_BODY, KIND_CAPTION
+
+        record = page(1, regions=[region("r0", Q, 0, kind=KIND_CAPTION),
+                                  region("r1", A, 1, kind=KIND_BODY)])
+
+        counts = pages_mod.line_counts(record)
+
+        assert counts["lines"] == 0
+        assert counts["other"] == 2
+
+    def test_a_page_of_them_is_not_a_silent_page(self):
+        """`silent_pages` is what the reader's "Nothing is said on this page" copy is
+        gated on. A page covered in Japanese is not silent."""
+        from morning.pageread import KIND_CAPTION
+
+        record = page(1, regions=[region("r0", Q, 0, kind=KIND_CAPTION)])
+        doc = {"pages": [record],
+               "chapters": [{"index": 1, "page_ids": [record["id"]]}]}
+
+        counts = pages_mod.chapter_counts(doc, doc["chapters"][0])
+
+        assert counts["other"] == 1
+        assert counts["silent_pages"] == 0
+
+    def test_a_page_with_genuinely_nothing_on_it_still_is(self):
+        record = page(1, regions=[])
+        doc = {"pages": [record],
+               "chapters": [{"index": 1, "page_ids": [record["id"]]}]}
+
+        counts = pages_mod.chapter_counts(doc, doc["chapters"][0])
+
+        assert counts["lines"] == 0 and counts["other"] == 0
+        assert counts["silent_pages"] == 1
+
+    def test_an_empty_region_of_a_non_translated_kind_is_not_counted(self):
+        from morning.pageread import KIND_CAPTION
+
+        record = page(1, regions=[region("r0", "   ", 0, kind=KIND_CAPTION)])
+        assert pages_mod.line_counts(record)["other"] == 0

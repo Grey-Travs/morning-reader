@@ -467,6 +467,16 @@ def line_counts(page: dict) -> dict:
     """
     lines = page.get("lines") or {}
     total = translated = stale = undrawable = 0
+
+    # Regions that carry text and are NOT translated — `body`, `caption`, `note`,
+    # `heading`, and anything the model labelled with a kind this app does not know
+    # (which `ocr._region_from` coerces to `body`). They were invisible: not counted,
+    # not shown, and a page made only of them reported `lines: 0` and had the reader
+    # print "Nothing is said on this page" over a page covered in Japanese.
+    read, _note = effective_read(page)
+    other = sum(1 for r in read.in_order()
+                if r.kind not in TRANSLATED_KINDS and (r.text or "").strip())
+
     for region in translatable_regions(page):
         total += 1
         if not is_drawable(region.box):
@@ -479,7 +489,8 @@ def line_counts(page: dict) -> dict:
         else:
             stale += 1
     return {"lines": total, "translated": translated, "stale": stale,
-            "untranslated": total - translated - stale, "undrawable": undrawable}
+            "untranslated": total - translated - stale, "undrawable": undrawable,
+            "other": other}
 
 
 # ---- manga chapters ----------------------------------------------------------
@@ -563,7 +574,7 @@ def chapter_counts(doc: dict, chapter: dict) -> dict:
     """How much of this chapter has usable English on it."""
     wanted = {str(i) for i in (chapter.get("page_ids") or [])}
     counts = {"lines": 0, "translated": 0, "stale": 0, "untranslated": 0,
-              "undrawable": 0, "pages": 0, "unchecked_pages": 0,
+              "undrawable": 0, "other": 0, "pages": 0, "unchecked_pages": 0,
               "unmeasured_pages": 0, "silent_pages": 0}
     for page in doc.get("pages", []):
         if str(page.get("id")) not in wanted:
@@ -574,7 +585,7 @@ def chapter_counts(doc: dict, chapter: dict) -> dict:
         if not (page.get("width") and page.get("height")):
             counts["unmeasured_pages"] += 1
         page_counts = line_counts(page)
-        if page_counts["lines"] == 0:
+        if page_counts["lines"] == 0 and page_counts["other"] == 0:
             # A page with nothing said on it. Counted rather than ignored: in a manga
             # it is usually a splash or an action beat, and "0 of 0 translated" reading
             # as complete would hide a page that was never read at all.
@@ -592,7 +603,7 @@ def summary(doc: dict) -> dict:
         status = str(page.get("status") or STATUS_NEW)
         by_status[status] = by_status.get(status, 0) + 1
     counts = {"lines": 0, "translated": 0, "stale": 0, "untranslated": 0,
-              "undrawable": 0}
+              "undrawable": 0, "other": 0}
     for page in pages:
         for key, value in line_counts(page).items():
             counts[key] += value

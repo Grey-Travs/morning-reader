@@ -360,3 +360,42 @@ def test_the_pipeline_does_not_save_state_itself(project, tmp_path):
     _run(project, FakeTranslator(_result(GOOD)), state=state)
 
     assert not project.paths.state_file.exists()
+
+
+# ---- the pending queue has two writers ----------------------------------------
+# `queue_new_terms` runs on the worker's threadpool; the approve/reject route runs on
+# another thread and takes `file_lock` around its own read-modify-write. A lock only
+# one side takes buys nothing: whichever saved last won, so either the owner's
+# rejection was undone or the names the worker had just harvested were dropped.
+
+def test_queueing_terms_waits_for_the_lock_the_other_writer_holds(tmp_path):
+    import threading
+    import time
+
+    from morning.config import Config
+    from morning.glossary import Glossary
+    from morning.locks import file_lock
+    from morning.pipeline import queue_new_terms
+
+    cfg = Config()
+    cfg.paths.glossary_pending = tmp_path / "glossary_pending.json"
+    done = threading.Event()
+
+    def worker():
+        queue_new_terms(cfg, Glossary(),
+                        [{"source": "葵", "english": "Aoi", "type": "name"}])
+        done.set()
+
+    with file_lock(cfg.paths.glossary_pending):
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        # It must be blocked while the other writer holds the lock. Without the fix it
+        # sails straight through and the two interleave.
+        assert not done.wait(timeout=0.4), (
+            "queue_new_terms did not wait for the lock the approve/reject route takes")
+
+    assert done.wait(timeout=5), "it never completed once the lock was released"
+    thread.join(timeout=5)
+
+    from morning.glossary import load_pending
+    assert [e["source"] for e in load_pending(cfg.paths.glossary_pending)] == ["葵"]

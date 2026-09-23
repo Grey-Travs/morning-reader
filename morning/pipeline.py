@@ -31,6 +31,7 @@ from .chapter_files import (
 from .chapters import KIND_EMPTY, KIND_ENGLISH, Chapter, classify
 from .config import Config
 from .glossary import Glossary, load_pending, merge_pending, save_pending
+from .locks import file_lock
 from .spend import Spend
 from .state import (
     STATUS_EMPTY, STATUS_ENGLISH, STATUS_NEEDS_REVIEW, STATUS_VALIDATED, State,
@@ -117,10 +118,16 @@ def queue_new_terms(cfg: Config, glossary: Glossary, terms: list[dict]) -> int:
     if not terms:
         return 0
     path = cfg.paths.glossary_pending
-    existing = load_pending(path)
-    queue, added = merge_pending(existing, terms, glossary=glossary)
-    if added:
-        save_pending(path, queue)
+    # Under the SAME lock the approve/reject route takes. This is a read-modify-write
+    # and so is `_drop_pending`; a lock only one side takes buys nothing, and whichever
+    # saved last won — either the owner's rejection was undone, or the names the worker
+    # had just harvested were dropped. The worker runs in a threadpool and the routes
+    # run elsewhere, so the two genuinely interleave.
+    with file_lock(path):
+        existing = load_pending(path)
+        queue, added = merge_pending(existing, terms, glossary=glossary)
+        if added:
+            save_pending(path, queue)
     return added
 
 

@@ -547,3 +547,70 @@ class TestTheBackwardsPageWarning:
 
         rows = client.get(f"/api/projects/{manga}/pages").json()["pages"]
         assert "looks_reversed" in rows[0]
+
+
+# ---- seams are proposed between the pages that will actually be built ---------
+# `propose_joins` filtered to APPROVED_STATUSES and zipped consecutive SURVIVORS. A
+# manga chapter-title page is stylised art with a huge vertical title — exactly the
+# page the reader marks `needs-check` — so it was dropped from the pairing, its printed
+# heading never became a `chapter` seam, and two chapters built as one. Worse, the pair
+# that WAS evaluated jumped the gap, so the page after it was stamped `gap` and the
+# build warned about a page that was never missing.
+
+class TestSeamProposal:
+    def test_an_unchecked_title_page_still_starts_a_chapter(self, client, manga):
+        with pages_mod.mutate_pages(manga) as doc:
+            doc["pages"] = [
+                _page(1, [region("r0", Q, 0)]),
+                _page(2, [region("r0", "第2話", 0)], status="needs-check",
+                      heading="第2話"),
+                _page(3, [region("r0", "次の日", 0)]),
+            ]
+
+        client.post(f"/api/projects/{manga}/pages/propose-joins")
+
+        doc = pages_mod.load_pages(manga)
+        assert doc["pages"][1]["join_prev"] == "chapter", (
+            "the title page was skipped, so its heading never became a seam")
+
+        built = client.post(f"/api/projects/{manga}/pages/build").json()
+        assert built["chapters"] == 2
+
+    def test_no_false_missing_page_warning_is_raised_over_it(self, client, manga):
+        with pages_mod.mutate_pages(manga) as doc:
+            doc["pages"] = [
+                _page(1, [region("r0", Q, 0)]),
+                _page(2, [region("r0", "第2話", 0)], status="needs-check",
+                      heading="第2話"),
+                _page(3, [region("r0", "次の日", 0)]),
+            ]
+
+        client.post(f"/api/projects/{manga}/pages/propose-joins")
+
+        assert pages_mod.load_pages(manga)["pages"][2]["join_prev"] != "gap"
+
+    def test_a_page_marked_not_text_is_still_skipped(self, client, manga):
+        """`skipped` means "deliberately not part of the book" — that one really does
+        leave the pairing."""
+        with pages_mod.mutate_pages(manga) as doc:
+            doc["pages"] = [
+                _page(1, [region("r0", Q, 0)]),
+                _page(2, [region("r0", "裏表紙", 0)], status="skipped"),
+                _page(3, [region("r0", "次の日", 0)], heading="第2話"),
+            ]
+
+        client.post(f"/api/projects/{manga}/pages/propose-joins")
+
+        doc = pages_mod.load_pages(manga)
+        assert doc["pages"][1]["join_prev"] == ""      # never paired
+        assert doc["pages"][2]["join_prev"] == "chapter"
+
+    def test_a_page_that_was_never_read_contributes_no_seam(self, client, manga):
+        with pages_mod.mutate_pages(manga) as doc:
+            doc["pages"] = [_page(1, [region("r0", Q, 0)]), _page(2, [])]
+            doc["pages"][1]["read"] = None
+            doc["pages"][1]["status"] = "new"
+
+        client.post(f"/api/projects/{manga}/pages/propose-joins")
+
+        assert pages_mod.load_pages(manga)["pages"][1]["join_prev"] == ""

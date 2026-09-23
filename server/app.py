@@ -31,7 +31,8 @@ from pydantic import BaseModel
 
 from morning import docs_source, google_auth
 from morning.chapter_files import (
-    has_previous, output_total, read_audit_translation, read_chapter,
+    has_previous, has_previous_audit, output_total, read_audit_translation,
+    read_chapter,
 )
 from morning.chapters import classify
 from morning.config import Config
@@ -763,8 +764,18 @@ def propose_joins(pid: str) -> dict:
     require_project(pid)
     proposed = 0
     with pages_mod.mutate_pages(pid) as doc:
+        # CONSECUTIVE pages in manifest order, not consecutive APPROVED ones. Filtering
+        # to approved dropped exactly the pages most likely to be unchecked — a manga
+        # chapter-title page is stylised art with a huge vertical title, which is what
+        # `needs-check` is for — so its printed heading never became a `chapter` seam
+        # and two chapters built as one. Worse, the pair that WAS evaluated jumped the
+        # gap, so the page after it was stamped `gap` and the build warned about a
+        # missing page that was never missing.
+        #
+        # A page with no read cannot contribute a seam either way; a skipped one is
+        # deliberately not part of the book. Everything else pairs.
         usable = [p for p in doc.get("pages", [])
-                  if p.get("status") in pages_mod.APPROVED_STATUSES]
+                  if p.get("status") != pages_mod.STATUS_SKIPPED and p.get("read")]
         for previous, following in zip(usable, usable[1:]):
             join = propose_join(pages_mod.page_text(previous),
                                 pages_mod.page_text(following), previous, following)
@@ -1149,6 +1160,11 @@ def read_chapter_view(pid: str, index: int) -> dict:
         "leak_findings": record.get("leak_findings", []),
         "validation": record.get("validation", {}),
         "has_previous_version": has_previous(Path(cfg.paths.output_dir), index, total),
+        # A needs-review chapter lives only in audit/, so a re-translate replaces the
+        # only copy there is. The replaced one is kept; say so, or it may as well not
+        # be.
+        "has_previous_audit": has_previous_audit(Path(cfg.paths.audit_dir),
+                                                 index, total),
         "prev": indices[position - 1] if position > 0 else None,
         "next": indices[position + 1] if position + 1 < len(indices) else None,
     }
