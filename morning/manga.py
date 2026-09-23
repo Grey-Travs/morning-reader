@@ -265,6 +265,12 @@ def parse_script_response(raw: str, expected_ids: list[str]
         if line_id not in wanted:
             unexpected.append(line_id)
             continue
+        if not english:
+            # A record with an empty English field is not a delivered line. Counting it
+            # as one marked the chapter "ok" with bubbles still in Japanese, and the
+            # default sweep — which skips finished chapters — then never went back for
+            # them. Treated as missing, which is what it is.
+            continue
         if line_id in lines:
             # Keep the first. A repeated record is far more often a duplicate than a
             # correction, and silently preferring the later one would let a stray echo

@@ -417,6 +417,13 @@ def _apply_page_result(pid: str, page_id: str, fields: dict) -> dict:
         if record is None:
             return {}
         record.update(fields)
+        # Recomputed HERE, on every read, because this is the only moment the regions
+        # change. It used to be written only when a human set an order — so on a page
+        # nobody had reordered it was absent, and the pages grid's "reads
+        # left-to-right" warning and `summary.reversed_pages` were both dead. That
+        # warning is the one thing in the app that catches a page transcribed
+        # backwards, which is invisible in fluent English.
+        record["order_check"] = pages_mod.order_check(record)
         totals = doc.setdefault("totals", {})
         totals["cost_usd"] = round(float(totals.get("cost_usd") or 0.0) + cost, 6)
         for key, value in usage.items():

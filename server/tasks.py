@@ -333,9 +333,10 @@ def translate_script_task(chapter: dict, ctx: TaskContext) -> dict:
         raise TaskRefused("the translation engine is not available")
 
     doc = pages.load_pages(ctx.pid)
-    wanted = [str(i) for i in (chapter.get("page_ids") or [])]
-    by_id = {str(p.get("id")): p for p in doc.get("pages", [])}
-    records = [by_id[i] for i in wanted if i in by_id]
+    # In MANIFEST order, not in the order `page_ids` was written — see
+    # `pages.chapter_pages`. A reorder after the build changes the reading order and
+    # the stored list does not follow it.
+    records = pages.chapter_pages(doc, chapter)
     if not records:
         raise TaskRefused("that chapter's pages are no longer in this project")
 

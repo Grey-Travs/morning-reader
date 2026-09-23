@@ -415,3 +415,135 @@ class TestTheChapterPayload:
         body = client.get(f"/api/projects/{built}/manga/1").json()
         assert body["order_changed"] is True
         assert all(not r["stale"] for r in body["pages"][0]["regions"])
+
+
+# ---- what a chapter's pages ARE, and whether it still needs work --------------
+# Four bugs with one root: a chapter's contents were read from the `page_ids` list in
+# the order it was written, and its done-ness was read off a stored status. Both go
+# stale the moment the pages change underneath them.
+
+class TestTheChapterFollowsItsPages:
+    def test_reordering_pages_changes_the_reading_order(self, client, built):
+        """The owner's most explicit statement about order. The pages screen obeyed it
+        and the reader did not — two screens silently disagreeing, with the one that
+        obeyed being the one nobody reads in."""
+        with pages_mod.mutate_pages(built) as doc:
+            doc["chapters"] = [{"index": 1, "title": "all", "start_seq": 1,
+                                "end_seq": 2,
+                                "page_ids": ["00000001", "00000002"], "status": ""}]
+
+        before = client.get(f"/api/projects/{built}/manga/1").json()
+        assert [p["seq"] for p in before["pages"]] == [1, 2]
+
+        client.post(f"/api/projects/{built}/pages/reorder",
+                    json={"ids": ["00000002", "00000001"]})
+
+        after = client.get(f"/api/projects/{built}/manga/1").json()
+        assert [p["seq"] for p in after["pages"]] == [2, 1]
+
+    def test_a_deleted_page_leaves_the_chapter(self, client, built):
+        with pages_mod.mutate_pages(built) as doc:
+            doc["chapters"] = [{"index": 1, "title": "all", "start_seq": 1,
+                                "end_seq": 2,
+                                "page_ids": ["00000001", "00000002"], "status": ""}]
+
+        client.post(f"/api/projects/{built}/pages/delete", json={"ids": ["00000001"]})
+
+        body = client.get(f"/api/projects/{built}/manga/1").json()
+        assert [p["seq"] for p in body["pages"]] == [2]
+
+
+class TestWhetherAChapterStillNeedsTranslating:
+    def test_deleting_a_page_and_rebuilding_does_not_re_bill(self, client, built):
+        """Demonstrated before the fix: translate ($0.02), delete one page, rebuild —
+        and the chapter read as never translated while its surviving pages still held
+        their English. A plain sweep then charged for it again."""
+        client.post(f"/api/projects/{built}/manga/translate", json={"indices": [1]})
+        _await_idle(client, built)
+        first = pages_mod.load_pages(built)["totals"]["cost_usd"]
+
+        client.post(f"/api/projects/{built}/pages/delete", json={"ids": ["00000002"]})
+        client.post(f"/api/projects/{built}/pages/build")
+
+        queued = client.post(f"/api/projects/{built}/manga/translate",
+                             json={}).json()["queued"]
+        _await_idle(client, built)
+
+        assert queued == [], "a chapter that is already translated was queued again"
+        assert pages_mod.load_pages(built)["totals"]["cost_usd"] == first
+
+    def test_a_line_typed_in_by_hand_completes_the_chapter(self, client, built,
+                                                           fake_translator):
+        """A chapter with one missing line stayed 'partly translated' forever and was
+        re-billed IN FULL by every sweep — even after the owner supplied the line."""
+        # Twice: half a chapter missing trips `should_retry`, and the retry must get
+        # the same incomplete answer rather than the fake's helpful default.
+        partial = f"1:r0{TAB}Aoi{TAB}No more.\n{NEW_TERMS_DELIMITER}\n[]"
+        fake_translator.answers = [partial, partial]
+        client.post(f"/api/projects/{built}/manga/translate", json={"indices": [1]})
+        _await_idle(client, built)
+        assert 1 in client.post(f"/api/projects/{built}/manga/translate",
+                                json={}).json()["queued"]
+
+        client.post(f"/api/projects/{built}/pages/00000001/lines/r1",
+                    json={"english": "Really?"})
+
+        # Chapter 2 is untranslated and still belongs in a sweep; chapter 1 does not.
+        assert 1 not in client.post(f"/api/projects/{built}/manga/translate",
+                                    json={}).json()["queued"]
+
+    def test_a_blank_english_is_not_a_delivered_line(self, client, built,
+                                                     fake_translator):
+        """An empty field counted as a delivered line, so a chapter with bubbles still
+        in Japanese was marked ok and the sweep never went back for them."""
+        blank = (f"1:r0{TAB}Aoi{TAB}No more.\n1:r1{TAB}Kenji{TAB}\n"
+                 f"{NEW_TERMS_DELIMITER}\n[]")
+        fake_translator.answers = [blank, blank]
+        client.post(f"/api/projects/{built}/manga/translate", json={"indices": [1]})
+        _await_idle(client, built)
+
+        chapter = pages_mod.load_pages(built)["chapters"][0]
+        assert chapter["status"] == pages_mod.STATUS_NEEDS_CHECK
+        assert "1:r1" in chapter["missing"]
+        assert 1 in client.post(f"/api/projects/{built}/manga/translate",
+                                json={}).json()["queued"]
+
+    def test_unread_pages_are_picked_up_once_they_are_read(self, client, manga):
+        """Building and translating before the pages were read marked every chapter
+        'Translated' permanently, because there were no lines to fail — and the sweep
+        then refused them forever."""
+        with pages_mod.mutate_pages(manga) as doc:
+            for page in doc["pages"]:
+                page["read"] = None
+                page["status"] = "new"
+        client.post(f"/api/projects/{manga}/pages/build")
+        client.post(f"/api/projects/{manga}/manga/translate", json={})
+        _await_idle(client, manga)
+
+        # The pages are read at last, so there is something to translate.
+        with pages_mod.mutate_pages(manga) as doc:
+            doc["pages"][0]["read"] = {
+                "width": 1600, "height": 2400,
+                "regions": [region("r0", Q, 0)], "order_source": "model",
+                "meta": {"confidence": "high", "heading": None, "notes": []}}
+            doc["pages"][0]["status"] = "ok"
+
+        assert client.post(f"/api/projects/{manga}/manga/translate",
+                           json={}).json()["queued"], (
+            "a chapter whose pages have now been read was never offered again")
+
+
+class TestTheBackwardsPageWarning:
+    def test_a_read_writes_the_order_check(self, client, manga, fake_translator):
+        """It was written only when a human set an order — so on a page nobody had
+        reordered it was absent, and the pages grid's warning and
+        `summary.reversed_pages` were both dead. That warning is the one thing in the
+        app that catches a page transcribed backwards."""
+        with pages_mod.mutate_pages(manga) as doc:
+            doc["pages"] = [_page(1, [])]
+            doc["pages"][0]["read"] = None
+            doc["pages"][0]["status"] = "new"
+            doc["pages"][0]["file"] = "page-0001.jpg"
+
+        rows = client.get(f"/api/projects/{manga}/pages").json()["pages"]
+        assert "looks_reversed" in rows[0]

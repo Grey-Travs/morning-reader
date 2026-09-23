@@ -525,6 +525,40 @@ def set_chapter_status(doc: dict, index: int, status: str, **fields) -> dict | N
     return chapter
 
 
+def chapter_pages(doc: dict, chapter: dict) -> list[dict]:
+    """This chapter's pages, in the order the MANIFEST has them NOW.
+
+    ``page_ids`` records MEMBERSHIP. The manifest records ORDER. The two disagree the
+    moment somebody reorders pages after a build — and reading the stored order then
+    showed the book in an order the owner had explicitly changed, while the pages
+    screen showed the new one. Two screens, silently disagreeing, with the one that
+    obeyed being the one nobody reads in.
+
+    A page deleted since the build is simply gone: the stored list still names it, and
+    there is nothing to show.
+    """
+    wanted = {str(i) for i in (chapter.get("page_ids") or [])}
+    return [p for p in doc.get("pages", []) if str(p.get("id")) in wanted]
+
+
+def chapter_needs_translating(doc: dict, chapter: dict) -> bool:
+    """Whether this chapter has bubbles with no English on them.
+
+    DERIVED from the lines, never from the stored status, and that is the point. The
+    status describes the last RUN; the lines are the work itself, and they live on the
+    pages. A stored status went wrong in three ways at once: deleting a page and
+    rebuilding reset a paid-for chapter to "never translated" and a sweep re-billed
+    it; building and translating before the pages were read marked every chapter
+    "translated" permanently, because there were no lines to fail; and a chapter with
+    one missing line stayed "partly translated" forever, re-billed in full by every
+    sweep even after the owner typed that line in by hand.
+
+    Derivation fixes all three, because it asks the only question that matters: is
+    there a bubble here with nothing on it?
+    """
+    return chapter_counts(doc, chapter)["untranslated"] > 0
+
+
 def chapter_counts(doc: dict, chapter: dict) -> dict:
     """How much of this chapter has usable English on it."""
     wanted = {str(i) for i in (chapter.get("page_ids") or [])}

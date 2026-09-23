@@ -891,10 +891,12 @@ async def translate_manga(pid: str,
             if index in wanted:
                 picked.append(index)
             continue
-        # A sweep takes only chapters that are not already done. Re-translating one
-        # that is, is what `force` is for, and doing it by default would re-bill the
-        # whole volume.
-        if req.force or chapter.get("status") != pages_mod.STATUS_OK:
+        # A sweep takes only chapters that still have bubbles with no English on
+        # them, DERIVED from the lines rather than read off the stored status — see
+        # `pages.chapter_needs_translating` for the three ways a stored status went
+        # wrong. Re-translating a finished chapter is what `force` is for, and doing
+        # it by default would re-bill the whole volume.
+        if req.force or pages_mod.chapter_needs_translating(doc, chapter):
             picked.append(index)
 
     if not picked:
@@ -1041,9 +1043,10 @@ def read_manga_chapter(pid: str, index: int) -> dict:
     if chapter is None:
         raise HTTPException(404, "There is no chapter with that number in this manga.")
 
-    by_id = {str(p.get("id")): p for p in doc.get("pages", [])}
-    wanted = [str(i) for i in (chapter.get("page_ids") or [])]
-    pages_out = [_manga_page_payload(by_id[i]) for i in wanted if i in by_id]
+    # Manifest order, so a reorder after the build is obeyed and a deleted page is
+    # simply gone — see `pages.chapter_pages`.
+    pages_out = [_manga_page_payload(p)
+                 for p in pages_mod.chapter_pages(doc, chapter)]
 
     indices = [int(c.get("index") or 0) for c in (doc.get("chapters") or [])]
     position = indices.index(index) if index in indices else -1
