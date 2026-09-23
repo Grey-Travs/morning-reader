@@ -14,7 +14,9 @@ convenience:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -82,3 +84,47 @@ It is here to prove the classifier keeps its hands off work that is done.
 @pytest.fixture
 def sample_source() -> str:
     return SAMPLE_JA
+
+
+# ---- nothing writes into the repo --------------------------------------------
+# Twice in one session a test wrote real output into the source tree: a bare
+# ``Config()`` has RELATIVE path defaults — "chapters", "audit", "state.json",
+# "glossary_pending.json" — so it resolves against the working directory, which during
+# a test run is the repo. `process_chapter` genuinely writes chapters and audit copies,
+# and they were committed before anyone noticed.
+#
+# `isolated_projects` above already redirects the PROJECT library. This covers the
+# other half: anything a default Config would drop in the repo root. Cheap enough to
+# run per test, and it names the test that did it rather than leaving a mystery folder.
+
+_REPO_ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Churn that is nobody's fault and belongs there.
+_EXPECTED = {".git", ".pytest_cache", "__pycache__", ".venv", "node_modules",
+             ".ruff_cache", ".mypy_cache"}
+
+
+def _repo_entries() -> set[str]:
+    try:
+        return {e for e in os.listdir(_REPO_ROOT) if e not in _EXPECTED}
+    except OSError:
+        return set()
+
+
+@pytest.fixture(autouse=True)
+def no_writes_into_the_repo():
+    """Fail the test that drops a file into the source tree, not a later one."""
+    before = _repo_entries()
+    yield
+    created = _repo_entries() - before
+    if created:
+        for name in created:
+            target = _REPO_ROOT / name
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+        raise AssertionError(
+            f"this test wrote into the repo: {sorted(created)}. A bare Config() has "
+            f"relative paths, so point cfg.paths at tmp_path (see tests/test_spend.py)."
+        )

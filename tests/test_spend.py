@@ -40,9 +40,28 @@ def _chapter(index: int = 1) -> Chapter:
     return Chapter(index=index, title="第1話", paragraphs=list(LONG))
 
 
-def _ctx(translator, cfg: Config | None = None, pid: str = "") -> task_mod.TaskContext:
+def _cfg(tmp_path) -> Config:
+    """A config whose every path is inside tmp_path.
+
+    A bare ``Config()`` has RELATIVE defaults — "chapters", "audit", "state.json",
+    "glossary_pending.json" — so it resolves against the working directory, which for
+    a test run is the repo. `process_chapter` really does write chapters and audit
+    copies, so a test holding a default Config writes them into the source tree. It
+    did, and they were committed.
+    """
+    cfg = Config()
+    cfg.paths.output_dir = tmp_path / "chapters"
+    cfg.paths.audit_dir = tmp_path / "audit"
+    cfg.paths.state_file = tmp_path / "state.json"
+    cfg.paths.glossary_json = tmp_path / "glossary.json"
+    cfg.paths.glossary_md = tmp_path / "glossary.md"
+    cfg.paths.glossary_pending = tmp_path / "glossary_pending.json"
+    return cfg
+
+
+def _ctx(translator, tmp_path, pid: str = "") -> task_mod.TaskContext:
     return task_mod.TaskContext(
-        cfg=cfg or Config(), state=State(), total=1, pid=pid,
+        cfg=_cfg(tmp_path), state=State(), total=1, pid=pid,
         glossary=Glossary(), translator=translator)
 
 
@@ -116,9 +135,9 @@ def always_fails_validation(monkeypatch):
 
 class TestTheProseRetryWindow:
     def test_a_rate_limit_during_the_retry_still_records_the_first_attempt(
-            self, always_fails_validation):
+            self, always_fails_validation, tmp_path):
         translator = _BillsThenRaises(_rate_limited())
-        ctx = _ctx(translator)
+        ctx = _ctx(translator, tmp_path)
 
         with pytest.raises(RateLimited):
             task_mod.translate_chapter(_chapter(), ctx)
@@ -127,9 +146,10 @@ class TestTheProseRetryWindow:
         assert record.get("cost_usd") == pytest.approx(0.05)
         assert record.get("usage") == {"input_tokens": 100}
 
-    def test_a_stop_during_the_retry_still_records_it(self, always_fails_validation):
+    def test_a_stop_during_the_retry_still_records_it(self, always_fails_validation,
+                                                      tmp_path):
         translator = _BillsThenRaises(TaskAborted("stopped"))
-        ctx = _ctx(translator)
+        ctx = _ctx(translator, tmp_path)
 
         with pytest.raises(TaskAborted):
             task_mod.translate_chapter(_chapter(), ctx)
@@ -137,30 +157,30 @@ class TestTheProseRetryWindow:
         assert (ctx.state.get(1) or {}).get("cost_usd") == pytest.approx(0.05)
 
     def test_an_ordinary_failure_during_the_retry_records_it_too(
-            self, always_fails_validation):
+            self, always_fails_validation, tmp_path):
         translator = _BillsThenRaises(RuntimeError("the connection dropped"))
-        ctx = _ctx(translator)
+        ctx = _ctx(translator, tmp_path)
 
         with pytest.raises(RuntimeError):
             task_mod.translate_chapter(_chapter(), ctx)
 
         assert (ctx.state.get(1) or {}).get("cost_usd") == pytest.approx(0.05)
 
-    def test_a_chapter_that_never_billed_records_nothing(self):
+    def test_a_chapter_that_never_billed_records_nothing(self, tmp_path):
         """`if spend:` — a chapter whose very first call failed must not get a
         misleading zero-cost entry."""
         class _RaisesImmediately(_BillsThenRaises):
             def translate_chapter(self, chapter, **kw):
                 raise self.exc
 
-        ctx = _ctx(_RaisesImmediately(RuntimeError("cold start")))
+        ctx = _ctx(_RaisesImmediately(RuntimeError("cold start")), tmp_path)
 
         with pytest.raises(RuntimeError):
             task_mod.translate_chapter(_chapter(), ctx)
 
         assert "cost_usd" not in (ctx.state.get(1) or {})
 
-    def test_the_success_path_is_not_double_counted(self):
+    def test_the_success_path_is_not_double_counted(self, tmp_path):
         """`process_chapter` already credits state on the way out. The accumulator
         must not add a second copy."""
         class _Succeeds(_BillsThenRaises):
@@ -173,7 +193,7 @@ class TestTheProseRetryWindow:
                                          cost_usd=0.05, chunks=1)
 
         translator = _Succeeds(None)
-        ctx = _ctx(translator)
+        ctx = _ctx(translator, tmp_path)
         task_mod.translate_chapter(_chapter(), ctx)
 
         # Once per CALL, which is the real invariant. This prose fails its checks, so
@@ -242,8 +262,8 @@ class TestTheMangaRetryWindow:
     def _chapter_record(pid):
         return pages_mod.load_pages(pid)["chapters"][0]
 
-    def test_an_interrupted_first_call_still_records_what_it_cost(self,
-                                                                  manga_project):
+    def test_an_interrupted_first_call_still_records_what_it_cost(
+            self, manga_project, tmp_path):
         class _Raises:
             def __init__(self):
                 from morning.config import TranslationConfig
@@ -252,7 +272,7 @@ class TestTheMangaRetryWindow:
             def _call(self, *a, **kw):
                 raise _rate_limited()
 
-        ctx = _ctx(_Raises(), pid=manga_project)
+        ctx = _ctx(_Raises(), tmp_path, pid=manga_project)
         with pytest.raises(RateLimited):
             task_mod.translate_script_task(self._chapter_record(manga_project), ctx)
 
@@ -260,7 +280,7 @@ class TestTheMangaRetryWindow:
         assert pages_mod.load_pages(manga_project)["totals"]["cost_usd"] == 0.0
 
     def test_an_interrupted_retry_still_records_the_paid_first_attempt(
-            self, manga_project):
+            self, manga_project, tmp_path):
         """The first attempt is complete, billed, and holds real English. It used to
         go with the frame, and the whole chapter was bought again from nothing."""
         from morning.prompts import NEW_TERMS_DELIMITER
@@ -279,15 +299,15 @@ class TestTheMangaRetryWindow:
                             {"input_tokens": 100}, 0.07)
                 raise _rate_limited()
 
-        ctx = _ctx(_PartialThenRaise(), pid=manga_project)
+        ctx = _ctx(_PartialThenRaise(), tmp_path, pid=manga_project)
         with pytest.raises(RateLimited):
             task_mod.translate_script_task(self._chapter_record(manga_project), ctx)
 
         assert pages_mod.load_pages(manga_project)["totals"]["cost_usd"] == \
             pytest.approx(0.07)
 
-    def test_the_retry_merge_keeps_what_the_second_attempt_found(self,
-                                                                 manga_project):
+    def test_the_retry_merge_keeps_what_the_second_attempt_found(
+            self, manga_project, tmp_path):
         """The merge copied the retry's lines, usage, cost and warnings but dropped
         its new terms and its call count."""
         from morning.prompts import NEW_TERMS_DELIMITER
@@ -308,7 +328,7 @@ class TestTheMangaRetryWindow:
                 return (f"{rows}\n{NEW_TERMS_DELIMITER}\n{terms}",
                         {"input_tokens": 10}, 0.01)
 
-        ctx = _ctx(_PartialThenRest(), pid=manga_project)
+        ctx = _ctx(_PartialThenRest(), tmp_path, pid=manga_project)
         fields = task_mod.translate_script_task(
             self._chapter_record(manga_project), ctx)
 
