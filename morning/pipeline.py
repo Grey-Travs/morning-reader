@@ -31,6 +31,7 @@ from .chapter_files import (
 from .chapters import KIND_EMPTY, KIND_ENGLISH, Chapter, classify
 from .config import Config
 from .glossary import Glossary, load_pending, merge_pending, save_pending
+from .spend import Spend
 from .state import (
     STATUS_EMPTY, STATUS_ENGLISH, STATUS_NEEDS_REVIEW, STATUS_VALIDATED, State,
 )
@@ -57,7 +58,8 @@ def _fewer_failures(a: ValidationResult, b: ValidationResult) -> bool:
 
 
 def translate_with_retry(chapter: Chapter, translator: Translator, cfg: Config,
-                         glossary: Glossary, hooks: StreamHooks | None = None
+                         glossary: Glossary, hooks: StreamHooks | None = None,
+                         spend: Spend | None = None
                          ) -> tuple[TranslationResult, ValidationResult, int]:
     """Translate, and try once more if the result fails its checks.
 
@@ -85,6 +87,7 @@ def translate_with_retry(chapter: Chapter, translator: Translator, cfg: Config,
         result = translator.translate_chapter(
             chapter, glossary_block=glossary_block, hooks=hooks,
             retry_hint=(RETRY_REMINDER if attempt else ""),
+            spend=spend,
         )
         attempts += 1
         for key, value in (result.usage or {}).items():
@@ -158,7 +161,8 @@ def accept_chapter(chapter: Chapter, total: int, cfg: Config, state: State,
 
 def process_chapter(chapter: Chapter, total: int, translator: Translator,
                     glossary: Glossary, cfg: Config, state: State,
-                    hooks: StreamHooks | None = None) -> ChapterOutcome:
+                    hooks: StreamHooks | None = None,
+                    spend: Spend | None = None) -> ChapterOutcome:
     """Run one chapter through translate → validate → retry → record.
 
     ``state`` is mutated but NOT saved — the caller owns persistence, because it is the
@@ -181,7 +185,7 @@ def process_chapter(chapter: Chapter, total: int, translator: Translator,
         return ChapterOutcome(STATUS_ENGLISH, {}, 0.0, [], [])
 
     result, validation, attempts = translate_with_retry(
-        chapter, translator, cfg, glossary, hooks)
+        chapter, translator, cfg, glossary, hooks, spend=spend)
 
     status = STATUS_VALIDATED if validation.ok else STATUS_NEEDS_REVIEW
 

@@ -63,6 +63,7 @@ from .prompts import (
     NEW_TERMS_DELIMITER, build_system_prompt, build_user_message,
 )
 from .sanitize import strip_meta
+from .spend import Spend
 
 _VALID_EFFORT = {"low", "medium", "high", "xhigh", "max"}
 
@@ -436,13 +437,19 @@ class Translator:
     # ---- translating one chapter -------------------------------------------
     def translate_chapter(self, chapter: Chapter, *, glossary_block: str = "",
                           hooks: StreamHooks | None = None,
-                          retry_hint: str = "") -> TranslationResult:
+                          retry_hint: str = "",
+                          spend: "Spend | None" = None) -> TranslationResult:
         """Translate one chapter, in as many calls as its length requires.
 
         Chunks are concatenated, and each after the first is given the tail of the
         previous one for continuity — marked as context, because a model that is not
         told will re-translate it and the chapter gains a duplicated paragraph at every
         boundary.
+
+        ``spend`` is the caller's accumulator. Each chunk is credited to it the moment
+        that call returns, because a raise on chunk four otherwise unwinds past the
+        locals holding the three completed, already-billed calls before them — and the
+        chapter is then re-run and re-bought in full. See :mod:`morning.spend`.
         """
         system_text = build_system_prompt(
             style_note=self.tcfg.style_note,
@@ -482,6 +489,9 @@ class Translator:
 
             raw, chunk_usage, chunk_cost = self._call(system_text, user_text,
                                                       hooks=hooks)
+            # Credited HERE, not at the end. This call is billed already.
+            if spend is not None:
+                spend.add(chunk_usage, chunk_cost)
             prose, terms, chunk_warnings = parse_response(raw)
             english_parts.append(prose)
             new_terms.extend(terms)

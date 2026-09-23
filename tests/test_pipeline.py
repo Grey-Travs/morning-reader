@@ -48,7 +48,7 @@ class FakeTranslator:
         self.calls: list[dict] = []
 
     def translate_chapter(self, chapter, *, glossary_block="", hooks=None,
-                          retry_hint=""):
+                          retry_hint="", spend=None):
         self.calls.append({"glossary_block": glossary_block,
                            "retry_hint": retry_hint, "chapter": chapter})
         result = self.results[min(len(self.calls) - 1, len(self.results) - 1)]

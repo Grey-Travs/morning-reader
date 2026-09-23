@@ -25,6 +25,7 @@ from morning.config import Config
 from morning.exceptions import TaskAborted, TaskRefused
 from morning.glossary import Glossary
 from morning.pipeline import process_chapter, queue_new_terms
+from morning.spend import Spend
 from morning.state import (
     STATUS_EMPTY, STATUS_ENGLISH, STATUS_PREPARED, State,
 )
@@ -244,8 +245,20 @@ def translate_chapter(chapter: Chapter, ctx: TaskContext) -> TaskResult:
         raise TaskRefused("the translation engine is not available")
 
     ctx.progress.check()
-    outcome = process_chapter(chapter, ctx.total, ctx.translator, ctx.glossary,
-                              ctx.cfg, ctx.state, hooks=ctx.hooks)
+    # Owned HERE so it survives the unwind. A rate limit between the two validation
+    # attempts, a Stop, or a dropped connection on chunk four all raise straight past
+    # `process_chapter`'s locals — and the completed calls before them were already
+    # billed. Crediting the worker's in-memory state before re-raising means the
+    # failure handlers (which all persist the record) carry the spend forward, so the
+    # re-run does not buy the same tokens twice. See morning/spend.py.
+    spend = Spend()
+    try:
+        outcome = process_chapter(chapter, ctx.total, ctx.translator, ctx.glossary,
+                                  ctx.cfg, ctx.state, hooks=ctx.hooks, spend=spend)
+    except BaseException:
+        if spend:
+            ctx.state.add_usage(chapter.index, spend.usage, spend.cost_usd)
+        raise
     return TaskResult(
         status=outcome.status,
         usage=outcome.usage,
@@ -317,6 +330,27 @@ def _order_hash(lines) -> str:
     return hashlib.sha256("|".join(line.id for line in lines).encode()).hexdigest()
 
 
+def _credit_manifest(pid: str, spend: Spend) -> None:
+    """Record billed calls against the project's manifest totals.
+
+    Called from the interrupted paths, where ``jobs._apply_script_result`` — the only
+    other writer of these totals — never runs. Best-effort: a failure here must not
+    replace the caller's real exception with a bookkeeping one.
+    """
+    if not spend or not pid:
+        return
+    try:
+        with pages.mutate_pages(pid) as doc:
+            totals = doc.setdefault("totals", {})
+            totals["cost_usd"] = round(
+                float(totals.get("cost_usd") or 0.0) + spend.cost_usd, 6)
+            for key, value in spend.usage.items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    totals[key] = (totals.get(key) or 0) + value
+    except Exception:  # noqa: BLE001 — never mask the real failure
+        pass
+
+
 def translate_script_task(chapter: dict, ctx: TaskContext) -> dict:
     """Translate one manga chapter's whole script.
 
@@ -359,10 +393,18 @@ def translate_script_task(chapter: dict, ctx: TaskContext) -> dict:
     glossary_block = ctx.glossary.to_prompt_block(
         "\n".join(line.text for line in lines))
 
-    result = manga.translate_script(
-        ctx.translator, lines, glossary_block=glossary_block,
-        title=str(chapter.get("title") or ""), hooks=ctx.hooks)
-    attempts = 1
+    # Owned here so a Stop or a rate limit cannot lose what has already been billed.
+    # The manga ledger is `pages.json` totals, written by `jobs._apply_script_result`
+    # — which is never reached on those paths, so this task credits it itself.
+    spend = Spend()
+    try:
+        result = manga.translate_script(
+            ctx.translator, lines, glossary_block=glossary_block,
+            title=str(chapter.get("title") or ""), hooks=ctx.hooks, spend=spend)
+        attempts = 1
+    except BaseException:
+        _credit_manifest(ctx.pid, spend)
+        raise
 
     if manga.should_retry(lines, result):
         # Told WHY, which is the only thing that makes a retry worth spending: an
@@ -370,10 +412,19 @@ def translate_script_task(chapter: dict, ctx: TaskContext) -> dict:
         ctx.progress.check()
         if ctx.hooks is not None:
             ctx.hooks.reset("retry")
-        again = manga.translate_script(
-            ctx.translator, lines, glossary_block=glossary_block,
-            title=str(chapter.get("title") or ""), hooks=ctx.hooks,
-            retry_hint=RETRY_REMINDER)
+        retry_spend = Spend()
+        try:
+            again = manga.translate_script(
+                ctx.translator, lines, glossary_block=glossary_block,
+                title=str(chapter.get("title") or ""), hooks=ctx.hooks,
+                retry_hint=RETRY_REMINDER, spend=retry_spend)
+        except BaseException:
+            # The FIRST attempt is complete, billed, and holds real English. Credit
+            # both it and whatever the retry managed before it was interrupted —
+            # otherwise the whole chapter is bought again from nothing.
+            _credit_manifest(ctx.pid, spend)
+            _credit_manifest(ctx.pid, retry_spend)
+            raise
         attempts += 1
         # Merge rather than replace. The second attempt can be worse than the first,
         # and a line the first call got and the second dropped must not be lost.
@@ -385,6 +436,11 @@ def translate_script_task(chapter: dict, ctx: TaskContext) -> dict:
                 result.usage[key] = result.usage.get(key, 0) + value
         result.lines = merged
         result.cost_usd = round(result.cost_usd + again.cost_usd, 6)
+        # The retry's harvest and its call count belong to the chapter too. Dropping
+        # them lost names the second attempt found, and under-reported how many calls
+        # the chapter actually took.
+        result.new_terms.extend(again.new_terms)
+        result.chunks += again.chunks
         result.warnings = result.warnings + [f"retry: {w}" for w in again.warnings]
         result.missing = [line.id for line in lines if line.id not in merged]
 

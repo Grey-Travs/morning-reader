@@ -49,6 +49,7 @@ from .prompts import (
     build_system_prompt,
 )
 from .reading_order import propose_panels
+from .spend import Spend
 from .translator import chunk_paragraphs
 
 # A fenced block around the whole answer. Stripped by line rather than by regex over the
@@ -305,7 +306,8 @@ def _accumulate(total: dict, part: dict) -> None:
 
 
 def translate_script(translator, lines: list[ScriptLine], *, glossary_block: str = "",
-                     title: str = "", hooks=None, retry_hint: str = "") -> ScriptResult:
+                     title: str = "", hooks=None, retry_hint: str = "",
+                     spend: Spend | None = None) -> ScriptResult:
     """Translate one chapter's script. Blocking — always called via a threadpool.
 
     Chunks only when a chapter is genuinely oversized, through the same
@@ -356,6 +358,12 @@ def translate_script(translator, lines: list[ScriptLine], *, glossary_block: str
             user_text += retry_hint
 
         raw, usage, cost = translator._call(system_text, user_text, hooks=hooks)
+        # Credited to the caller's accumulator the moment the call returns. `result`
+        # is a local here, so a Stop or a rate limit between chunks — or between the
+        # two attempts, one level up — unwinds past it and the completed, already
+        # billed calls go with it. See morning/spend.py.
+        if spend is not None:
+            spend.add(usage, cost)
         produced, terms, warnings = parse_script_response(raw, wanted)
 
         result.lines.update(produced)

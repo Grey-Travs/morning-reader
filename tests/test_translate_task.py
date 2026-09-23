@@ -40,7 +40,7 @@ class FakeTranslator:
         FakeTranslator.instances.append(self)
 
     def translate_chapter(self, chapter, *, glossary_block="", hooks=None,
-                          retry_hint=""):
+                          retry_hint="", spend=None):
         self.calls.append(chapter)
         if hooks is not None:
             hooks.source(chapter.paragraphs)

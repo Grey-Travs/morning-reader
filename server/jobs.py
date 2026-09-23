@@ -798,7 +798,11 @@ async def _run_worker(job: Job, cfg: Config) -> None:
             job.live = None
             if not already_done:
                 state.update(index, status=STATUS_PENDING, title=chapter.title)
-                state = _persist_item_state(state, state_path, index)
+            # Persisted either way. The status is only rewritten for an unfinished
+            # item, but the task may have credited spend from calls that completed
+            # before the stop landed — and those were billed whether or not this item
+            # was already done on disk.
+            state = _persist_item_state(state, state_path, index)
             job.queued.discard(key)
             job.current = None
             rec = state.get(index) or {}
