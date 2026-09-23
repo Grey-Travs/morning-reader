@@ -53,6 +53,44 @@ unless the original was one. No preamble ("Here is…"), no notes, no alternativ
 explanation — nothing before it and nothing after it. Do not echo the Japanese, and do
 not output a new-terms block."""
 
+# A manga chapter's whole script, one record per line.
+#
+# Swapped in through `build_system_prompt(output_contract=...)`, which is exactly what
+# that parameter exists for: a manga inherits the entire voice contract above it —
+# the glossary block, the canonical names, the `[he]`/`[she]`/`[they]` pins, the
+# `[refers to self as 俺]` register tags, the honorific rules, the onomatopoeia rules
+# and the per-project style note — without the prompt being forked. Forking it would
+# mean bubbles shipping without the rules that make the glossary tags they are fed
+# mean anything, and every one of those failures is fluent English.
+#
+# **Tab-separated, not JSON.** The opposite of the choice `morning/ocr.py` makes, for
+# the opposite reason. A page read has to interleave coordinates with text, which has
+# no prose form. A script does not: it is a flat list. And a truncated JSON array
+# yields NOTHING, whereas every complete tab-separated record before the cut is still
+# usable — which matters here because a chapter is a hundred and fifty lines the owner
+# paid to have read. A tab cannot occur inside a bubble's English or inside a name.
+MANGA_OUTPUT_CONTRACT = """\
+**Output contract — one record per line:**
+1. For EVERY line id you were given, in the order you were given them, output one line with three fields separated by a single TAB character:
+
+   `<id>` TAB `<speaker>` TAB `<the English>`
+
+   For example:
+
+   12:r0\tAoi\tI told you it was impossible.
+   12:r4\t\tKRASH
+
+   - `<id>` is copied exactly as given, including the page number and the colon. Never renumber, never merge two lines into one, never split one line into two.
+   - `<speaker>` is who says it, spelled exactly as the glossary spells them. Leave it EMPTY when the chapter does not tell you — an honest blank is worth far more than a guess, because a wrong name is carried into every later chapter.
+   - The English is one line. No line breaks inside it, no Markdown, no quotation marks added around the whole line, and no notes.
+2. Then a line containing only `===NEW_TERMS===`, followed by the JSON array of newly encountered names and terms described below. If none, output `[]`. Output nothing after it.
+
+**Translating a comic, not prose:**
+- `[bubble]` and `[thought]` are what a character says or thinks. `[narration]` is a caption box. `[aside]` is small marginal text, often the author's. `[sign]` is text drawn into the scene — a shop sign, a letter, a phone screen — so translate it as the object reads, not as speech.
+- `[sfx]` is a sound effect drawn into the art. Render it as a short English sound effect, not as a sentence and not as a romanization. A sound with no English equivalent may stay as a brief descriptive word.
+- **Keep it short.** Each line has to fit inside the balloon it was drawn for. Prefer the shorter natural phrasing; do not expand a four-character bubble into a full sentence, and never add explanation the art already carries.
+- Japanese omits the subject constantly, and a bubble has no surrounding prose to recover it from. Use the whole chapter — who is present, who was addressed, whose turn it is — and the glossary's pronoun and register pins to decide. Once you have decided who is speaking, keep them consistent for the whole chapter."""
+
 SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert literary translator who adapts Japanese web novels and light novels into natural, native-English prose. Output clean Markdown.
 {style_note_line}
@@ -164,4 +202,48 @@ def build_user_message(paragraphs: list[str], *, title: str = "",
     if instruction:
         parts.append(f"Additional instructions for this work: {instruction}")
     parts.append("Translate the following:\n\n" + "\n\n".join(paragraphs))
+    return "\n\n".join(parts)
+
+
+MANGA_CHUNK_NOTE = """\
+This is part {index} of {total} of one chapter of a comic. Translate ONLY the lines
+given below, and output a record for every one of them. The story continues past the
+end of this part, so do not write it an ending."""
+
+MANGA_CONTINUITY_TEMPLATE = """\
+For continuity only — the end of the previous part, already translated. It tells you
+who is present and how they speak. Do not output records for these lines:
+
+{tail}"""
+
+
+def build_manga_user_message(pages: list[str], *, title: str = "",
+                             chunk_index: int = 1, chunk_total: int = 1,
+                             previous_tail: str = "",
+                             extra_instruction: str = "") -> str:
+    """One manga chapter's script (or one chunk of it) as the user turn.
+
+    ``pages`` is one pre-rendered block per page — its header, its panels and its
+    numbered lines. Blocks rather than individual lines because that is where a chunk
+    boundary belongs: splitting a chapter mid-page would hand the model half a
+    conversation and take the page header away from the lines under it.
+
+    The continuity tail is the same device the prose path uses and exists for the same
+    reason: a model not told that the tail is context will re-translate it, and the
+    chapter gains a duplicated exchange at every boundary. Here it does a second job —
+    manga speech breaks across a page turn far more often than prose does, so the tail
+    is frequently the only place the subject of the first bubble appears.
+    """
+    parts: list[str] = []
+    if chunk_total > 1:
+        parts.append(MANGA_CHUNK_NOTE.format(index=chunk_index, total=chunk_total))
+    if previous_tail.strip():
+        parts.append(MANGA_CONTINUITY_TEMPLATE.format(tail=previous_tail.strip()))
+    if title.strip() and chunk_index == 1:
+        parts.append(f"Chapter title: {title.strip()}")
+    instruction = (extra_instruction or "").strip()
+    if instruction:
+        parts.append(f"Additional instructions for this work: {instruction}")
+    parts.append("Translate every line below, in this order:\n\n"
+                 + "\n\n".join(pages))
     return "\n\n".join(parts)
