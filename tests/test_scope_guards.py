@@ -163,28 +163,32 @@ def test_the_google_client_is_only_ever_used_to_read():
     for name in sorted(_GOOGLE_MODULES):
         path = ROOT / name
         assert path.exists(), f"{name} is listed as a Google module but does not exist"
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Attribute):
-                continue
-            if node.attr in _MUTATING_METHODS:
-                offences.append(f"{name}:{node.lineno}: calls .{node.attr}()")
-            if node.attr in _FORBIDDEN_SERVICES:
-                offences.append(f"{name}:{node.lineno}: reaches .{node.attr}()")
+        # Through the SHARED helper, which is the whole point of it existing. This was
+        # an inline copy of the same walk, so the parametrized proof below exercised a
+        # DUPLICATE: narrow the real guard and the proof would keep passing against
+        # untouched code, and the suite would still claim the check was live.
+        for lineno, attr in _mutating_calls(path.read_text(encoding="utf-8")):
+            verb = "calls" if attr in _MUTATING_METHODS else "reaches"
+            offences.append(f"{name}:{lineno}: {verb} .{attr}()")
 
     assert not offences, (
         "Morning Reader reads documents and never writes them. Found:\n  "
         + "\n  ".join(offences))
 
 
-def _mutating_calls(source: str) -> list[str]:
-    """The banned method names a piece of source calls. Shared by the guard above and
-    by the test below that proves the guard can actually fail."""
-    found = []
+def _mutating_calls(source: str) -> list[tuple[int, str]]:
+    """Every banned method name a piece of source calls, with the line it is on.
+
+    Genuinely shared now: the guard above runs it over the real modules, and the
+    parametrized proof below runs it over source that SHOULD trip it. One
+    implementation, so narrowing the guard breaks the proof — which is the only thing
+    that makes the proof worth having.
+    """
+    found: list[tuple[int, str]] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Attribute):
             if node.attr in _MUTATING_METHODS or node.attr in _FORBIDDEN_SERVICES:
-                found.append(node.attr)
+                found.append((node.lineno, node.attr))
     return found
 
 
@@ -201,7 +205,7 @@ def test_the_operation_guard_can_actually_fail(source, expected):
     This runs the same check against source that SHOULD trip it, so the passing
     result above means "nothing mutating is called", not "the check does nothing".
     """
-    assert sorted(_mutating_calls(source)) == sorted(expected)
+    assert sorted(attr for _line, attr in _mutating_calls(source)) == sorted(expected)
 
 
 def test_the_google_scopes_are_read_only():
@@ -259,12 +263,14 @@ def test_the_api_states_that_it_does_not_publish():
 # Words that name the source language rather than its ROLE. Any of them appearing in
 # a persisted key, a field name or an API response is the mistake this app was
 # separated in order to avoid.
+# NO trailing \b. `_` is a word character, so `\bhangul\b` cannot match
+# `hangul_fraction` — and the compound form is the form the mistake actually takes.
+# Every example this guard's own docstring names walked straight past it.
 _BANNED_NAMES = re.compile(
-    r"\b("
-    r"korean|hangul"                      # the app this one was split from; scope-guard: ok
-    r"|japanese_fraction|japanese_hash"    # the same mistake in the new language; scope-guard: ok
-    r"|jp_fraction|ja_fraction"  # scope-guard: ok
-    r")\b",
+    r"\b(korean|hangul|nihongo)"           # the app this one was split from; scope-guard: ok
+    r"|\bjapanese_\w+"                     # japanese_fraction, japanese_hash, ...; scope-guard: ok
+    r"|\bjp_(fraction|hash|text)"          # scope-guard: ok
+    r"|\bja_(fraction|hash|text)",         # scope-guard: ok
     re.IGNORECASE,
 )
 
@@ -389,3 +395,37 @@ def test_the_api_calls_the_original_text_source():
     for key in chapter:
         assert not _BANNED_NAMES.search(key), key
     assert pj.get_project(pid) is not None
+
+
+# ---- the banned-name guard can actually match ---------------------------------
+# `\b(...)\b` could not match `hangul_fraction`, because `_` is a word character and
+# there is no boundary between `hangul` and `_fraction`. Every COMPOUND form — which
+# is the form the mistake actually takes, and the form this guard's own docstring names
+# as the example — walked straight past it. The guard stayed green on the day someone
+# ported a Night Reader helper wholesale.
+
+@pytest.mark.parametrize("name", [
+    "hangul_fraction",      # scope-guard: ok
+    "korean_hash",          # scope-guard: ok
+    "japanese_fraction",    # scope-guard: ok
+    "japanese_hash",        # scope-guard: ok
+    "jp_fraction",          # scope-guard: ok
+    "ja_hash",              # scope-guard: ok
+    "nihongo_text",         # scope-guard: ok
+])
+def test_a_language_name_in_a_key_is_caught(name):
+    assert _BANNED_NAMES.search(name), (
+        f"{name!r} names the source LANGUAGE rather than its role, and the guard "
+        f"that exists to catch it did not")
+
+
+@pytest.mark.parametrize("line", [
+    "from .japanese import source_fraction",
+    "def has_japanese(text: str) -> bool:",
+    "source_fraction = metrics.source_fraction",
+    "metrics.content_hash",
+])
+def test_the_guard_leaves_legitimate_code_alone(line):
+    """Widening it must not make every honest reference to the language layer a
+    violation — `morning/japanese.py` is a module name, not a stored key."""
+    assert not _BANNED_NAMES.search(line), f"{line!r} is legitimate and was flagged"

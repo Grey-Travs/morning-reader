@@ -62,6 +62,74 @@ MAX_SOURCE_BYTES = 20 * 1024 * 1024
 
 app = FastAPI(title="Morning Reader")
 
+# Hostnames this server will answer to. `launch.py` binds loopback, which stops a
+# remote attacker — but not the owner's own browser, which is the delivery vehicle for
+# both problems below, and loopback does nothing about either:
+#
+#  * **DNS rebinding.** A domain that rebinds to 127.0.0.1 is SAME-ORIGIN to the
+#    browser, so a page the owner has open could list their projects, read every
+#    translation and start runs that spend their plan. Refusing a Host header this
+#    server does not recognise is what defeats it, and it costs one comparison.
+#  * **Cross-origin state change.** Some routes take no body and no project id, so
+#    they are "simple requests" a foreign page can send with no preflight —
+#    `POST /api/google/disconnect` returns 200 and unlinks the saved refresh token.
+#
+# A set rather than a constant so tests can add their own hostname without the
+# production allow-list having to know about test infrastructure.
+ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"}
+
+_STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _hostname(value: str) -> str:
+    """The host part of a Host header or an origin's authority, without the port.
+
+    IPv6 arrives bracketed (``[::1]:8100``), so splitting on ":" first would return
+    "[" and refuse a perfectly good local request.
+    """
+    value = (value or "").strip().lower()
+    if value.startswith("["):
+        end = value.find("]")
+        return value[:end + 1] if end != -1 else value
+    return value.split(":")[0]
+
+
+@app.middleware("http")
+async def _local_only(request: Request, call_next):
+    """Refuse requests that did not come from this machine's own server.
+
+    Deliberately narrow: a missing Origin is allowed, because the frontend is served
+    same-origin from ``web/dist`` and same-origin navigations send none.
+    """
+    host = _hostname(request.headers.get("host", ""))
+    if host and host not in ALLOWED_HOSTS:
+        return JSONResponse(
+            status_code=421,
+            content={"detail": errors.as_dict(errors.Explained(
+                code="wrong-host",
+                title="That address does not belong to this app",
+                what=f"Morning Reader answers on localhost, and this request asked for "
+                     f"{host!r}.",
+                fixes=["Open the app at http://127.0.0.1:8100."],
+                status=421))})
+
+    origin = request.headers.get("origin")
+    if origin and request.method in _STATE_CHANGING:
+        from urllib.parse import urlparse
+
+        if _hostname(urlparse(origin).netloc) not in ALLOWED_HOSTS:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": errors.as_dict(errors.Explained(
+                    code="wrong-origin",
+                    title="That request came from another site",
+                    what=f"A page at {origin} tried to change something in Morning "
+                         f"Reader. Only the app itself may do that.",
+                    fixes=["Use the app at http://127.0.0.1:8100."],
+                    status=403))})
+
+    return await call_next(request)
+
 
 # Every error leaves through one of these two handlers, so the frontend always
 # receives `detail` as the SAME object shape (see server/errors.Explained) and the
@@ -221,7 +289,11 @@ async def create_upload_project(file: UploadFile, title: str = "",
     arrives as Shift_JIS or EUC-JP often enough that assuming UTF-8 would turn a
     perfectly good file into mojibake. See ``morning.textsource.decode_upload``.
     """
-    data = await file.read()
+    # Bounded. `read()` with no argument materialises the WHOLE part as one
+    # bytes object before the next line can compare its length, so a stray 3 GB
+    # file is committed to RAM and only then rejected — with a paid job possibly
+    # in flight. One byte past the cap is all that is needed to fail the check.
+    data = await file.read(MAX_SOURCE_BYTES + 1)
     if len(data) > MAX_SOURCE_BYTES:
         raise HTTPException(413, "That file is larger than Morning Reader accepts "
                                  "(20 MB). Split it and upload the parts.")
@@ -609,7 +681,7 @@ async def upload_pages(pid: str, files: list[UploadFile],
             rejected.append({"name": name, "reason": "That image is larger than "
                                                      "Morning Reader accepts."})
             continue
-        data = await upload.read()
+        data = await upload.read(MAX_IMAGE_BYTES + 1)
         if len(data) > MAX_IMAGE_BYTES:
             rejected.append({"name": name, "reason": "That image is larger than "
                                                      "Morning Reader accepts."})

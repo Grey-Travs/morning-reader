@@ -32,6 +32,9 @@ from pathlib import Path
 import httpx
 import pytest
 
+# `testserver` rather than `test`: the server refuses a Host it does not recognise
+# (see server/app._local_only), and tests/conftest.py allows exactly this name.
+
 from server import pages as pages_mod, projects as pj
 from server.app import app
 from tests.test_images import jpeg
@@ -61,7 +64,7 @@ def test_two_overlapping_uploads_keep_every_page(project):
     async def run() -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as client:
+                                     base_url="http://testserver") as client:
             def batch(tag: str, sizes):
                 return [("files", (f"{tag}{i}.jpg", io.BytesIO(_big(w, h)),
                                    "image/jpeg"))
@@ -101,7 +104,7 @@ def test_a_page_seq_is_never_reused(project):
     async def run() -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport,
-                                     base_url="http://test") as client:
+                                     base_url="http://testserver") as client:
             await asyncio.gather(*[
                 client.post(f"/api/projects/{project}/pages",
                             files=[("files", (f"{tag}.jpg",

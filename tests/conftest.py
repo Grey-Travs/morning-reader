@@ -128,3 +128,11 @@ def no_writes_into_the_repo():
             f"this test wrote into the repo: {sorted(created)}. A bare Config() has "
             f"relative paths, so point cfg.paths at tmp_path (see tests/test_spend.py)."
         )
+
+
+# Starlette's TestClient uses http://testserver as its base URL, so every request it
+# makes carries `Host: testserver`. The production allow-list has no business knowing
+# about test infrastructure, so the concession lives here instead.
+from server import app as _app_mod  # noqa: E402
+
+_app_mod.ALLOWED_HOSTS.add("testserver")
