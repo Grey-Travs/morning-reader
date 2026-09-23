@@ -125,6 +125,93 @@ def propose_join(previous_text: str, following_text: str,
     return Join(JOIN_PARAGRAPH, GLUE_NONE, 0.4, "no clear signal either way")
 
 
+@dataclass
+class Span:
+    """A manga chapter: a contiguous run of pages, not a string of prose."""
+
+    index: int
+    title: str
+    start_seq: int
+    end_seq: int
+    page_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"index": self.index, "title": self.title,
+                "start_seq": self.start_seq, "end_seq": self.end_seq,
+                "page_ids": list(self.page_ids)}
+
+
+@dataclass
+class SpanAssembly:
+    spans: list[Span] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    pages_used: int = 0
+
+
+def assemble_spans(pages: list[dict]) -> SpanAssembly:
+    """Group an ordered run of pages into manga chapters.
+
+    The same seam vocabulary as :func:`assemble`, asked of the same field — a manga's
+    chapter boundary is the same question as a novel's. What differs is what comes out:
+    a novel gets prose, a manga gets a RANGE OF PAGES, because a manga chapter is its
+    art and its art never becomes a string.
+
+    **Which pages are in a span is decided differently from the novel path, on
+    purpose.** ``assemble`` takes only ``APPROVED_STATUSES``, excluding a page the
+    reader was unsure about, because once prose is concatenated into a chapter there is
+    no way to point at the un-reviewed part ever again. In a manga every line stays
+    bolted to its page and its box forever, so it CAN be pointed at — and it is, by the
+    reader and the script view, which carry each page's status. So the gate moves from
+    *exclude* to *label*: a span holds every non-skipped page in its run.
+
+    Excluding an unchecked page here would put a hole in the middle of the book. A
+    wordless action page has no text to review at all and is frequently the climax; a
+    page dropped from a manga is a scene the reader never sees, which is far worse than
+    un-reviewed transcription they can see and correct.
+
+    A book with no chapter seam anywhere becomes one chapter of every page, which is
+    the right answer for a single-volume scan.
+    """
+    spans: list[Span] = []
+    warnings: list[str] = []
+    current: list[dict] = []
+    title = ""
+    used = 0
+
+    def flush() -> None:
+        nonlocal current, title
+        if current:
+            spans.append(Span(
+                index=len(spans) + 1,
+                title=title or f"Chapter {len(spans) + 1}",
+                start_seq=int(current[0].get("seq") or 0),
+                end_seq=int(current[-1].get("seq") or 0),
+                page_ids=[str(p.get("id") or "") for p in current]))
+        current, title = [], ""
+
+    for position, page in enumerate(pages):
+        if page.get("status") == "skipped":
+            continue
+        used += 1
+        heading = _heading_of(page)
+        kind = str(page.get("join_prev") or "")
+
+        if kind == JOIN_GAP:
+            label = page.get("name") or f"page {page.get('seq', position + 1)}"
+            warnings.append(
+                f"A page may be missing just before {label}. Check whether one went "
+                f"unphotographed — a missing page is a scene nobody will see.")
+
+        if current and kind == JOIN_CHAPTER:
+            flush()
+        if not current and heading:
+            title = heading
+        current.append(page)
+
+    flush()
+    return SpanAssembly(spans=spans, warnings=warnings, pages_used=used)
+
+
 def assemble(pages: list[dict], *, text_of) -> Assembly:
     """Build chapters from an ordered run of pages.
 

@@ -33,8 +33,14 @@ from pathlib import Path
 from morning.atomic import atomic_write_json, quarantine_unreadable
 from morning.images import ImageInfo
 from morning.pageread import (
-    GLUE_NONE, JOIN_KINDS, PROSE_KINDS, flatten, page_from_dict,
+    GLUE_NONE, JOIN_KINDS, PROSE_KINDS, TRANSLATED_KINDS, apply_text_order, flatten,
+    is_drawable, order_texts, page_from_dict, region_hash,
+    # Aliased: this module defines its own `reorder` for the PAGE order, and a
+    # bare import would be shadowed by it — silently sending a list of region
+    # ids to the function that reorders pages.
+    reorder as reorder_regions,
 )
+from morning.reading_order import disagreement, looks_reversed
 
 from . import projects as pj
 from .locks import file_lock
@@ -120,6 +126,9 @@ def now_iso() -> str:
 
 def new_doc() -> dict:
     return {"version": 1, "next_seq": 1, "pages": [], "batches": [],
+            # A manga's chapters: contiguous runs of pages, written by the build and
+            # never into source.json. A novel leaves this empty.
+            "chapters": [],
             "build": None, "totals": {"cost_usd": 0.0}}
 
 
@@ -145,7 +154,10 @@ def load_pages(pid: str) -> dict:
     doc.setdefault("pages", [])
     doc.setdefault("batches", [])
     doc.setdefault("build", None)
+    doc.setdefault("chapters", [])
     doc.setdefault("totals", {"cost_usd": 0.0})
+    if not isinstance(doc["chapters"], list):
+        doc["chapters"] = []
     if not isinstance(doc["pages"], list):
         doc["pages"] = []
     doc.setdefault("next_seq",
@@ -341,6 +353,125 @@ def set_status(doc: dict, page_id: str, status: str, **fields) -> dict | None:
     return page
 
 
+# ---- the manga side ----------------------------------------------------------
+#
+# Three keys live BESIDE ``read`` on a page record, never inside it, and that placement
+# is the design rather than a detail. ``jobs._apply_page_result`` merges the page
+# reader's output with ``record.update(fields)``, and those fields carry ``"read"`` —
+# the whole new PageRead. So anything stored INSIDE ``read`` is silently destroyed by
+# the next re-read, while a sibling survives untouched.
+#
+# That is why ``order`` (a human's corrected reading order) and ``lines`` (English the
+# owner paid for) are siblings. It also fixes a live bug: ``order_source: "user"``
+# stored inside ``read`` is wiped by a re-read today, which the region contract's own
+# docstring forbids.
+
+def effective_read(page: dict):
+    """The page as it should actually be read, and a note when something was lost.
+
+    A human's saved reading order is stored as the TEXTS in their order, not as region
+    ids, because ids are not an identity — ``ocr._region_from`` assigns them from the
+    model's list position, so a second read can hand the same bubble a different id.
+    Matching on the words survives a re-read; matching on ids would take a human's
+    correct ordering of the OLD boxes and scramble the new ones with it.
+
+    When the page no longer says the same things the saved order is NOT forced on. That
+    would be the genuinely dangerous outcome — a human's ordering applied to bubbles
+    they never saw, looking decided. The model's order comes back instead, and the note
+    says so by name.
+    """
+    read = page_from_dict(page.get("read") or {})
+    saved = (page.get("order") or {}).get("texts")
+    if not saved:
+        return read, ""
+    applied = apply_text_order(read, [str(t) for t in saved])
+    if applied is None:
+        return read, ("your reading order no longer applies — the words on this page "
+                      "changed when it was read again")
+    return applied, ""
+
+
+def order_check(page: dict) -> dict:
+    """What the page's own geometry thinks of its reading order.
+
+    Free: the boxes are already stored and laying them out is arithmetic. It is also
+    the only thing in the app that can catch a page read left-to-right, which is
+    backwards sentence by sentence while every sentence stays fluent English.
+    """
+    read, _ = effective_read(page)
+    return {"looks_reversed": looks_reversed(read),
+            "disagreement": disagreement(read),
+            "order_source": read.order_source}
+
+
+def set_order(page: dict, ids: list[str] | None) -> bool:
+    """Record a human's reading order for one page, or clear it.
+
+    ``ids`` must be a permutation of the page's regions; a partial list would drop
+    bubbles out of the reading, so it is refused rather than applied. ``None`` clears
+    the saved order and returns the page to the model's — the only way back, and
+    deliberately explicit: a human's order is never reverted silently, but it can be
+    revoked on purpose.
+    """
+    if ids is None:
+        page["order"] = None
+        page["order_check"] = order_check(page)
+        return True
+    read, _ = effective_read(page)
+    try:
+        reordered = reorder_regions(read, [str(i) for i in ids])
+    except ValueError:
+        return False
+    page["order"] = {"texts": order_texts(reordered), "source": "user",
+                     "at": now_iso()}
+    page["order_check"] = order_check(page)
+    return True
+
+
+def set_line(page: dict, region_id: str, **fields) -> dict:
+    """Write one translated line onto a page record."""
+    lines = page.setdefault("lines", {})
+    if not isinstance(lines, dict):
+        lines = page["lines"] = {}
+    line = lines.setdefault(str(region_id), {})
+    line.update(fields)
+    line["at"] = now_iso()
+    return line
+
+
+def translatable_regions(page: dict) -> list:
+    """The regions of this page a manga translation call would be given."""
+    read, _ = effective_read(page)
+    return [r for r in read.in_order()
+            if r.kind in TRANSLATED_KINDS and (r.text or "").strip()]
+
+
+def line_counts(page: dict) -> dict:
+    """How much of this page has usable English on it.
+
+    **Fails closed, uniquely in this file.** Every other loader here degrades open — a
+    malformed record becomes something usable. A line whose ``source_hash`` is missing,
+    empty or the wrong type is counted STALE, never translated. Failing open would show
+    paid-for English on a bubble whose Japanese has since changed, which reads as
+    correct and cannot be spotted by looking at it.
+    """
+    lines = page.get("lines") or {}
+    total = translated = stale = undrawable = 0
+    for region in translatable_regions(page):
+        total += 1
+        if not is_drawable(region.box):
+            undrawable += 1
+        record = lines.get(region.id) if isinstance(lines, dict) else None
+        if not isinstance(record, dict) or not str(record.get("english") or "").strip():
+            continue
+        if record.get("source_hash") == region_hash(region):
+            translated += 1
+        else:
+            stale += 1
+    return {"lines": total, "translated": translated, "stale": stale,
+            "untranslated": total - translated - stale, "undrawable": undrawable}
+
+
 def summary(doc: dict) -> dict:
     """Counts the pages screen reads, so it does not compute them five ways."""
     pages = doc.get("pages", [])
@@ -348,6 +479,11 @@ def summary(doc: dict) -> dict:
     for page in pages:
         status = str(page.get("status") or STATUS_NEW)
         by_status[status] = by_status.get(status, 0) + 1
+    counts = {"lines": 0, "translated": 0, "stale": 0, "untranslated": 0,
+              "undrawable": 0}
+    for page in pages:
+        for key, value in line_counts(page).items():
+            counts[key] += value
     return {
         "total": len(pages),
         "by_status": by_status,
@@ -357,4 +493,14 @@ def summary(doc: dict) -> dict:
         "chars": sum(page_chars(p) for p in pages),
         "totals": doc.get("totals", {"cost_usd": 0.0}),
         "build": doc.get("build"),
+        # The manga side. A novel's pages carry no lines, so these come back zero and
+        # the pages screen shows nothing extra.
+        "chapters": len(doc.get("chapters") or []),
+        # Counted only where the human has NOT already decided the order: nagging a
+        # page somebody has settled is what `set_join`'s user rule exists to prevent.
+        "reversed_pages": sum(
+            1 for p in pages
+            if (p.get("order_check") or {}).get("looks_reversed")
+            and (p.get("order_check") or {}).get("order_source") != "user"),
+        **counts,
     }
