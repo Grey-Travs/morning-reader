@@ -73,6 +73,38 @@ export function boxIsInside(box) {
 }
 
 /**
+ * Whether this box can actually have something drawn on it.
+ * Mirrors `pageread.is_drawable`.
+ *
+ * Distinct from `boxIsInside`, which asks whether a box is WELL FORMED. A box can be
+ * perfectly well formed and still be undrawable: a zero-size box is valid — an
+ * unmeasured page stores nothing but those — and draws nothing at all. An overlay that
+ * silently renders nothing for such a region shows a bubble with no English and no
+ * explanation, which reads as "the app missed this one".
+ *
+ * Both sides need the same answer: the server counts undrawable regions for its "N
+ * lines could not be placed on the page" banner, and this decides what to skip. If they
+ * disagree the banner lies — it claims a line was placed that was not, or it stays
+ * silent while a bubble has no English on screen.
+ *
+ * Overhanging the page edge is allowed; the wrapper clips it. A box entirely off the
+ * page is not.
+ */
+export function isDrawable(box) {
+  if (!Array.isArray(box) || box.length !== 4) return false
+  const values = box.map(asFloat)
+  if (values.some((v) => v === null || !Number.isFinite(v))) return false
+  const [x, y, w, h] = values
+  if (w <= 0 || h <= 0) return false
+  // The visible part: the box intersected with the page.
+  const left = Math.max(0, x)
+  const top = Math.max(0, y)
+  const right = Math.min(1, x + w)
+  const bottom = Math.min(1, y + h)
+  return right - left > 0 && bottom - top > 0
+}
+
+/**
  * A stored box as CSS percentages, which is how the overlay actually positions things.
  *
  * Percentages rather than pixels on purpose: the box then tracks the image through

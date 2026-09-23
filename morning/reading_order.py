@@ -177,6 +177,70 @@ def _walk(rects: list[_Rect], *, direction: str, slack: float) -> list[_Rect]:
     return sorted(rects, key=lambda r: (r.x0, r.y0, r.seq))
 
 
+def _leaves(rects: list[_Rect], *, direction: str, slack: float) -> list[list[_Rect]]:
+    """The same recursion as :func:`_walk`, returning its LEAVES instead of a flat list.
+
+    A leaf is a set of boxes that no cut separates — which is what a panel is. The
+    recursion already computes this; panels are simply the groups it stops at.
+    """
+    if len(rects) <= 1:
+        return [list(rects)] if rects else []
+
+    tiers = _groups(rects, axis="y", slack=slack)
+    if tiers is not None:
+        out: list[list[_Rect]] = []
+        for tier in tiers:
+            out.extend(_leaves(tier, direction=direction, slack=slack))
+        return out
+
+    columns = _groups(rects, axis="x", slack=slack)
+    if columns is not None:
+        if direction == DIRECTION_RTL:
+            columns = list(reversed(columns))
+        out = []
+        for column in columns:
+            out.extend(_leaves(column, direction=direction, slack=slack))
+        return out
+
+    return [_walk(rects, direction=direction, slack=slack)]
+
+
+def propose_panels(regions: list[Region], *, direction: str = DIRECTION_RTL,
+                   slack: float = DEFAULT_SLACK) -> list[list[str]]:
+    """The regions grouped into panels, in reading order.
+
+    A panel is not a new kind of information: it is where the cut stops. The recursion
+    that recovers reading order is already a tier-and-column segmentation of the page,
+    and its leaves are the clusters no line separates — which is what a drawn panel is.
+
+    So this costs nothing and needs nothing new on disk. The alternative was to ask the
+    model for a ``panel`` field, which would mean a paid vision re-read of every page
+    already transcribed, to obtain something the stored boxes already imply — and a
+    second fallible proposal on the record.
+
+    That trade only works because a wrong panel is **presentational**. It groups lines
+    under a heading in the script view; getting it wrong is visible and harmless. A
+    wrong reading ORDER is invisible and changes the story, which is why that one is
+    corrected by a human and this one is not.
+
+    The limits are the module's own, and they show up here as merged or split panels
+    rather than as anything worse: a sound effect drawn across the page blocks every
+    cut and collapses it to one panel; two bubbles with clear air between them inside
+    one drawn panel come back as two.
+    """
+    if direction not in DIRECTIONS:
+        direction = DIRECTION_RTL
+    rects = _rects(regions)
+    if not rects:
+        return []
+    if not any(r.x1 > r.x0 and r.y1 > r.y0 for r in rects):
+        # No geometry at all. One panel holding everything is the only honest answer —
+        # inventing panels from nothing would read as structure the page does not have.
+        return [[r.id for r in sorted(rects, key=lambda r: r.seq)]]
+    return [[r.id for r in leaf]
+            for leaf in _leaves(rects, direction=direction, slack=max(0.0, slack))]
+
+
 def propose_order(regions: list[Region], *, direction: str = DIRECTION_RTL,
                   slack: float = DEFAULT_SLACK) -> list[str]:
     """Region ids in the order a reader would read them.

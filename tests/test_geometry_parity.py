@@ -32,7 +32,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
 
-from morning.pageread import box_is_inside, from_pixels, to_pixels  # noqa: E402
+from morning.pageread import (  # noqa: E402
+    box_is_inside, from_pixels, is_drawable, to_pixels,
+)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GEOMETRY_JS = os.path.join(REPO, "web", "src", "geometry.js")
@@ -57,7 +59,7 @@ def _run_js(body: str) -> list:
     test something other than what the browser receives.
     """
     script = (
-        f"import {{ toPixels, fromPixels, boxIsInside, toPercent, EPS }} "
+        f"import {{ toPixels, fromPixels, boxIsInside, isDrawable, toPercent, EPS }} "
         f"from {json.dumps(_module_url())}\n" + body
     )
     result = subprocess.run([_NODE, "--input-type=module", "-e", script],
@@ -107,6 +109,66 @@ def test_both_sides_agree_on_what_a_box_is():
         assert box_is_inside(case) == answer, (
             f"pageread.py and geometry.js disagree about {case!r} — a region the "
             f"server stores would not be drawn, or one it rejects would be")
+
+
+# ---- what can actually be drawn ----------------------------------------------
+# The second two-sided rule, and the only one step 4 adds. The server counts undrawable
+# regions for the reader's "N lines could not be placed on the page" banner; the browser
+# decides which elements to skip. Disagreement makes the banner lie.
+
+DRAWABLE_CASES = BOX_CASES + [
+    [0.0, 0.0, 0.0, 0.5],            # zero width: valid, but nothing to draw on
+    [0.0, 0.0, 0.5, 0.0],            # zero height
+    [-0.5, 0.2, 0.3, 0.3],           # entirely off the left edge
+    [1.2, 0.2, 0.3, 0.3],            # entirely off the right edge
+    [0.2, -0.9, 0.3, 0.3],           # entirely above the page
+    [-0.1, 0.2, 0.3, 0.3],           # overhanging the left edge, mostly on the page
+    [0.9, 0.2, 0.3, 0.3],            # overhanging the right edge
+    [0.0, 0.0, 1.5, 1.5],            # bigger than the page, but covering it
+    [-0.0000001, 0.0, 0.5, 0.5],     # a hair off the edge
+]
+
+
+def test_both_sides_agree_on_what_can_be_drawn():
+    js = _run_js("const cases = " + json.dumps(DRAWABLE_CASES) + "\n"
+                 "console.log(JSON.stringify(cases.map(isDrawable)))\n")
+    for case, answer in zip(DRAWABLE_CASES, js):
+        assert is_drawable(case) == answer, (
+            f"pageread.is_drawable and geometry.isDrawable disagree about {case!r} — "
+            f"the reader's count of unplaceable lines would not match what it drew")
+
+
+def test_a_zero_size_box_is_valid_but_not_drawable():
+    """The distinction the pair exists for. A page whose dimensions could not be read
+    stores nothing but zero boxes; the text is worth keeping, and there is nowhere to
+    put it. Treating the two questions as one either throws the text away or draws
+    twelve invisible points and says nothing."""
+    assert box_is_inside([0.0, 0.0, 0.0, 0.0])
+    assert not is_drawable([0.0, 0.0, 0.0, 0.0])
+
+
+def test_a_box_overhanging_the_edge_is_still_drawable():
+    """The wrapper clips it. Refusing to draw a bubble because the model's box ran two
+    percent past the edge would blank the English on a bubble that is plainly there."""
+    assert is_drawable([-0.1, 0.2, 0.3, 0.3])
+    assert is_drawable([0.9, 0.2, 0.3, 0.3])
+
+
+def test_a_box_entirely_off_the_page_is_not():
+    assert not is_drawable([1.2, 0.2, 0.3, 0.3])
+    assert not is_drawable([-0.5, 0.2, 0.3, 0.3])
+
+
+def test_nan_and_infinity_are_not_drawable():
+    """`NaN%` draws nothing and reports nothing — the silent case this pair exists to
+    make loud."""
+    assert not is_drawable([float("nan"), 0.0, 0.5, 0.5])
+    assert not is_drawable([0.0, 0.0, float("inf"), 0.5])
+    assert not is_drawable([float("-inf"), 0.0, 0.5, 0.5])
+
+
+def test_a_negative_size_is_not_drawable():
+    assert not is_drawable([0.5, 0.5, -0.2, 0.2])
 
 
 # ---- placing a box on an image -----------------------------------------------

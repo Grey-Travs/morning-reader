@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EPS, boxIsInside, fromPixels, toPercent, toPixels } from './geometry'
+import { EPS, boxIsInside, fromPixels, isDrawable, toPercent, toPixels } from './geometry'
 
 // tests/test_geometry_parity.py already compares this file against morning/pageread.py
 // case by case. This one exists so `npm test` catches a break without Node-shelling and
@@ -90,6 +90,53 @@ describe('what counts as a box', () => {
     expect(boxIsInside([0.1, 0.1, 0.2, 0.2, 0.3])).toBe(false)
     expect(boxIsInside(null)).toBe(false)
     expect(boxIsInside('0.1,0.1,0.2,0.2')).toBe(false)
+  })
+})
+
+describe('what can actually be drawn', () => {
+  // A second question from `boxIsInside`, and the distinction matters: a box can be
+  // perfectly well formed and still have nothing to draw on. The server counts these
+  // for its "N lines could not be placed" banner, so the two sides must agree —
+  // tests/test_geometry_parity.py pins that.
+
+  it('draws an ordinary bubble', () => {
+    expect(isDrawable([0.1, 0.2, 0.3, 0.4])).toBe(true)
+  })
+
+  it('will not draw a zero-size box, though the box is valid', () => {
+    // A page whose dimensions could not be read stores nothing but these. The text is
+    // worth keeping; there is nowhere to put it.
+    expect(boxIsInside([0, 0, 0, 0])).toBe(true)
+    expect(isDrawable([0, 0, 0, 0])).toBe(false)
+    expect(isDrawable([0, 0, 0, 0.5])).toBe(false)
+    expect(isDrawable([0, 0, 0.5, 0])).toBe(false)
+  })
+
+  it('still draws a box that overhangs the edge', () => {
+    // The wrapper clips it. Blanking a bubble because the model's box ran two percent
+    // past the edge would hide English on a bubble that is plainly there.
+    expect(isDrawable([-0.1, 0.2, 0.3, 0.3])).toBe(true)
+    expect(isDrawable([0.9, 0.2, 0.3, 0.3])).toBe(true)
+  })
+
+  it('will not draw a box that is entirely off the page', () => {
+    expect(isDrawable([1.2, 0.2, 0.3, 0.3])).toBe(false)
+    expect(isDrawable([-0.5, 0.2, 0.3, 0.3])).toBe(false)
+    expect(isDrawable([0.2, -0.9, 0.3, 0.3])).toBe(false)
+  })
+
+  it('will not draw NaN or infinity', () => {
+    expect(isDrawable([NaN, 0, 0.5, 0.5])).toBe(false)
+    expect(isDrawable([0, 0, Infinity, 0.5])).toBe(false)
+  })
+
+  it('will not draw a negative size', () => {
+    expect(isDrawable([0.5, 0.5, -0.2, 0.2])).toBe(false)
+  })
+
+  it('will not draw something that is not four values', () => {
+    expect(isDrawable(null)).toBe(false)
+    expect(isDrawable([0.1, 0.1, 0.2])).toBe(false)
   })
 })
 

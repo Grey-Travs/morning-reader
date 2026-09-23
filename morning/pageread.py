@@ -58,6 +58,7 @@ in the first few KB), which needs no Pillow and does not trust the client.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, replace
 
 # How a region (or a page) follows the one before it. Language-neutral: it describes
@@ -118,6 +119,16 @@ PROSE_KINDS = frozenset({KIND_BODY, KIND_CAPTION, KIND_NOTE})
 # reader treats them differently (a sign is scenery; an sfx sits on the art), so they
 # are named separately rather than lumped in.
 SCRIPT_KINDS = frozenset({KIND_BUBBLE, KIND_THOUGHT, KIND_NARRATION, KIND_ASIDE})
+
+# The kinds a manga translation call is GIVEN. Wider than SCRIPT_KINDS because a sign
+# and a sound effect are translated too — the docstring above already says so — while
+# the script view lists only what is spoken. Two sets, because "what is translated" and
+# "what is listed as dialogue" are different questions that happen to overlap.
+#
+# Page furniture is excluded on purpose: paying to translate a page number is the
+# clearest possible waste, and a translated running head would then be drawn over the
+# art on every page of the book.
+TRANSLATED_KINDS = SCRIPT_KINDS | {KIND_SIGN, KIND_SFX}
 
 CONFIDENCE_LEVELS = ("high", "medium", "low")
 
@@ -323,6 +334,101 @@ def reorder(page: PageRead, ids: list[str]) -> PageRead:
         regions=[replace(r, order=position[r.id]) for r in page.regions],
         order_source="user",
     )
+
+
+def region_hash(region: Region) -> str:
+    """This region's text, as the key that decides whether a translation is still true.
+
+    The per-region analogue of ``ChapterMetrics.content_hash``, and it is used the same
+    way: the presence of a translation says the work finished, this hash says it
+    finished against the words that are there *now*. A re-read that changes a bubble's
+    Japanese makes its English stale and visible instead of silently wrong.
+
+    **Text and nothing else.** Not the box, not the kind. A box nudged by a re-read is
+    the same words in almost the same place, and re-billing a line for that would make
+    every re-read cost a full re-translation. A region relabelled ``bubble`` -> ``sign``
+    is also the same words; what changed is how the reader draws it.
+
+    Stripped first, so trailing whitespace from one read and not another is not a
+    difference — the same normalisation ``flatten`` applies.
+    """
+    return hashlib.sha256((region.text or "").strip().encode("utf-8")).hexdigest()
+
+
+def is_drawable(box) -> bool:
+    """Whether this box can actually have something drawn on it.
+
+    Distinct from :func:`box_is_inside`, which asks whether a box is WELL FORMED. A box
+    can be perfectly well formed and still be undrawable: a zero-size box is valid (an
+    unmeasured page stores nothing but those) and draws nothing at all. An overlay that
+    silently renders nothing for such a region shows the reader a bubble with no
+    English and no explanation, which reads as "the app missed this one".
+
+    So this is the question the overlay actually asks, and the answer has to be the
+    same on both sides — the server counts undrawable regions for its banner and the
+    browser decides what to skip. If the two disagree the banner lies. Mirrored by
+    ``isDrawable`` in ``web/src/geometry.js`` and pinned by
+    ``tests/test_geometry_parity.py``.
+
+    A box is drawable when every value is finite, it has positive area, and it overlaps
+    the page. Overhanging the edge is allowed — the wrapper clips it — but a box
+    entirely off the page is not.
+    """
+    try:
+        x, y, w, h = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return False
+    if any(v != v or v in (float("inf"), float("-inf")) for v in (x, y, w, h)):
+        return False
+    if w <= 0 or h <= 0:
+        return False
+    # The visible part: the box intersected with the page.
+    left, top = max(0.0, x), max(0.0, y)
+    right, bottom = min(1.0, x + w), min(1.0, y + h)
+    return right - left > 0 and bottom - top > 0
+
+
+def apply_text_order(page: PageRead, texts: list[str]) -> PageRead | None:
+    """Re-apply a human's saved reading order to a page that has been read again.
+
+    The problem this solves: **region ids are not an identity.** ``ocr._region_from``
+    assigns ``r0``, ``r1``… from the model's list position and the prompt never asks for
+    an id, so a second read of the same page can hand the same bubble a different id.
+    Re-applying a saved order by id would take a human's correct ordering of the OLD
+    boxes and scramble a possibly-correct new one with it.
+
+    Matching on the words is what survives, because the words are what the human was
+    looking at when they decided. Each saved text is consumed against the first region
+    that still has it, so duplicates resolve by list position.
+
+    Returns ``None`` when the page no longer says the same things — a different number
+    of regions, or different words. That is the honest answer: an order a human chose
+    for text they never saw is worse than no order at all, because it looks decided.
+    The caller then falls back to the model's order and says so.
+    """
+    remaining = list(page.regions)
+    ids: list[str] = []
+    for text in texts:
+        wanted = (text or "").strip()
+        match = next((r for r in remaining if (r.text or "").strip() == wanted), None)
+        if match is None:
+            return None
+        remaining.remove(match)
+        ids.append(match.id)
+    if remaining:
+        return None
+    try:
+        return reorder(page, ids)
+    except ValueError:
+        return None
+
+
+def order_texts(page: PageRead) -> list[str]:
+    """The page's region texts in its current reading order — what a saved order stores.
+
+    Stored rather than ids for the reason in :func:`apply_text_order`.
+    """
+    return [(r.text or "").strip() for r in page.in_order()]
 
 
 # ---- flattening (the novel path) ---------------------------------------------
