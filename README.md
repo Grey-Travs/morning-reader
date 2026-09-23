@@ -3,9 +3,9 @@
 Japanese novels and manga, translated and read locally. A sibling to Night Reader, not
 a fork of it.
 
-**Status: step 2 of 5 — complete.** Bring in a Japanese novel by pasting it,
-uploading a `.txt`, or reading a Google Doc; translate it; review what the checks
-flagged; approve the terms it proposed; and read it.
+**Status: step 3 of 5 — complete.** Bring in a Japanese novel by pasting it,
+uploading a `.txt`, reading a Google Doc, or photographing the pages; translate it;
+review what the checks flagged; approve the terms it proposed; and read it.
 
 ---
 
@@ -64,6 +64,35 @@ text:
 Building novels on flat text first would mean rewriting this contract *and* re-reading
 every page already processed.
 
+## Reading a stack of photographs
+
+Add a work from *Photographs or scans* and it is created **empty** — a scanned book
+has no chapters until its pages have been read. The pages screen is then the work:
+
+1. **Add pages.** Every file is identified and measured from its own **bytes**;
+   the content type is advisory and the filename is a guess. JPEG, PNG and WebP all
+   carry their dimensions in the first few KB, so `morning/images.py` reads them
+   without Pillow and without trusting the client. A file already in the project is
+   reported as a duplicate rather than stored twice — re-uploading a folder is
+   ordinary, and paying to read the same page again is not.
+2. **Read them.** One page per queued item, through the same worker, the same abort,
+   and the same rate-limit ride-out as a chapter. A page already read is never read
+   again unless you select it.
+3. **Check the ones it was unsure about.** They are *excluded from the build* until
+   you look. Building with them would put un-reviewed transcription into the novel,
+   which is the same mistake as reading an unaccepted translation.
+4. **Fix the seams.** How each page follows the one before it — same sentence, new
+   paragraph, new chapter, or *a page is missing*. The app proposes; you correct; a
+   seam you decided is marked `user` and a later re-read never silently reverts it.
+   Order is changed by moving a page, and the whole new order is sent, because the
+   server refuses anything that is not a permutation of what it already has.
+5. **Build the chapters.** After this the project is an ordinary one, and nothing
+   downstream can tell it was ever a stack of photographs.
+
+A page's filename carries a monotonic `seq`, never its position, so reordering
+rewrites the manifest only — it never renames a file, which would break image caching
+in the browser and race an in-flight read holding a path.
+
 ## Running it
 
 ```bash
@@ -79,8 +108,8 @@ developing; a reload would kill an in-flight job, so it is off by default).
 ## Tests
 
 ```bash
-.venv\Scripts\python.exe -m pytest tests/ -q     # 637 tests
-cd web && npm test                                # 31 tests
+.venv\Scripts\python.exe -m pytest tests/ -q     # 810 tests
+cd web && npm test                                # 50 tests
 ```
 
 **No test makes a real model call.** The SDK's `query` is replaced by a fake async
@@ -106,6 +135,9 @@ morning/          the engine — imports nothing from the web layer
   state.py        per-item status/hash/usage — the resumability contract
   chapters.py     the Chapter contract every ingestion path converges on
   pageread.py     THE REGION CONTRACT
+  images.py       format and dimensions from the header BYTES, no Pillow
+  ocr.py          reading one page image into regions
+  page_build.py   pages -> chapters: the seams, and the gaps they imply
   japanese.py     script detection (the easy half of the language layer)
   textsource.py   paste / .txt ingestion
   docs_source.py  Google Doc ingestion, one chapter per tab — READ ONLY
@@ -123,9 +155,11 @@ server/
   jobs.py         one worker per project, FIFO, abort, rate-limit ride-out
   tasks.py        what a queued item asks the worker to do
   projects.py     project storage; `kind` is novel | manga from day one
+  pages.py        the page manifest; order lives here, not in filenames
   errors.py       every failure becomes something a reader can act on
   console.py      the same events, rendered to the terminal
-web/              Vite + React interface: Library, work page, Activity
+web/              Vite + React interface: Library, work page, Pages, Reader,
+                  Glossary, Activity
 ```
 
 ## Two rules worth knowing before reading the code
@@ -154,16 +188,18 @@ recoverable, deleting prose is not.
   and very short utterances are not caught, because a threshold low enough to catch
   them flags every kept shop sign and sound effect. Making the rule stricter later
   should therefore be a decision, not a surprise.
-* **`width`/`height` are on the contract but nothing obtains them yet.** The
-  recommendation on the record: sniff them from the image header bytes server-side —
-  JPEG, PNG and WebP all carry dimensions in the first few KB — which needs no Pillow
-  and does not trust the client.
+* **HEIC is not accepted.** Browsers cannot display it, so storing one would give a
+  page with no thumbnail and no way to check the read against the image. The upload
+  says so by name rather than rejecting the file as unreadable.
+* **Reading order within a page is the model's proposal and nothing corrects it yet.**
+  `order_source` is on the record and a human's value is already protected from being
+  overwritten; the editor that sets it is step 4.
 
 ## Build order
 
 1. ~~Spine: storage, state, locks, atomic writes, job queue, errors, Activity.~~ ✔
 2. ~~Novel pipeline: translate → validate → retry → audit → reader, plus the glossary
    and its pending queue. Google Docs ingestion.~~ ✔
-3. Page harness with the region contract; novels flatten regions.
+3. ~~Page harness with the region contract; novels flatten regions.~~ ✔
 4. Manga: reading order, overlay reader, script view.
 5. The Japanese site-export stripper, once real samples exist.

@@ -441,3 +441,52 @@ def test_a_page_that_needs_checking_is_not_built_in(client, project, fake_reader
     response = client.post(f"/api/projects/{project}/pages/build")
 
     assert response.status_code == 400
+
+
+# ---- the way in ---------------------------------------------------------------
+# Everything above starts from a project created in Python. These start from the
+# route the library screen calls, because until step 3 there was no way to make a
+# project whose source is photographs at all — the pages screen had no door.
+
+def test_a_scanned_project_is_created_empty(client):
+    response = client.post("/api/projects/scan", json={"title": "撮った本"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["chapters"] == 0
+    assert body["project"]["ingest"] == pj.INGEST_IMAGES
+    assert body["project"]["title"] == "撮った本"
+
+
+def test_a_scanned_project_says_it_is_one(client):
+    """`ingest` is stored, not inferred. An empty project whose source is a stack of
+    photographs looks exactly like a failed text import, and the two need entirely
+    different things offered to the user."""
+    pid = client.post("/api/projects/scan", json={"title": "x"}).json()["project"]["id"]
+
+    project = client.get(f"/api/projects/{pid}").json()["project"]
+
+    assert project["ingest"] == pj.INGEST_IMAGES
+    assert project["kind"] == pj.KIND_NOVEL
+
+
+def test_a_scanned_manga_keeps_its_kind(client):
+    pid = client.post("/api/projects/scan",
+                      json={"title": "x", "kind": "manga"}).json()["project"]["id"]
+
+    assert client.get(f"/api/projects/{pid}").json()["project"]["kind"] == "manga"
+
+
+def test_an_unknown_kind_is_refused_rather_than_defaulted(client):
+    response = client.post("/api/projects/scan", json={"title": "x", "kind": "poem"})
+
+    assert response.status_code == 400
+
+
+def test_a_scanned_project_accepts_pages_straight_away(client):
+    """The whole point of the route: created, then uploaded to, with no source in
+    between. The pages directory has to exist already."""
+    pid = client.post("/api/projects/scan", json={"title": "x"}).json()["project"]["id"]
+
+    assert _upload(client, pid, jpeg(W, H)).status_code == 200
+    assert client.get(f"/api/projects/{pid}/pages").json()["summary"]["total"] == 1

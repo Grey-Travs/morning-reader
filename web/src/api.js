@@ -58,6 +58,10 @@ export const api = {
   getChapter: (pid, index) => req(`/api/projects/${pid}/chapters/${index}`),
 
   createFromText: (body) => req('/api/projects/text', json(body)),
+  // A scanned work starts EMPTY — its chapters do not exist until the pages have
+  // been read and built. See the route's docstring for why that is stored, not
+  // inferred.
+  createFromScans: (body) => req('/api/projects/scan', json(body)),
   uploadTxt: (file, { title = '', kind = 'novel', mode = 'heading' } = {}) => {
     const form = new FormData()
     form.append('file', file)
@@ -109,6 +113,27 @@ export const api = {
     req(`/api/projects/${pid}/glossary/reject`, json({ source })),
   removeTerm: (pid, source) =>
     req(`/api/projects/${pid}/glossary/remove`, json({ source })),
+
+  // Scanned pages. Every file is identified and measured from its own BYTES on the
+  // server — the content type is advisory and the filename is a guess.
+  pages: (pid) => req(`/api/projects/${pid}/pages`),
+  page: (pid, pageId) => req(`/api/projects/${pid}/pages/${pageId}`),
+  pageImageUrl: (pid, pageId) => `/api/projects/${pid}/pages/${pageId}/image`,
+  uploadPages: (pid, files, label = '') => {
+    const form = new FormData()
+    for (const file of files) form.append('files', file)
+    return req(`/api/projects/${pid}/pages?label=${encodeURIComponent(label)}`,
+      { method: 'POST', body: form })
+  },
+  readPages: (pid, body = {}) => req(`/api/projects/${pid}/pages/read`, json(body)),
+  reorderPages: (pid, ids) => req(`/api/projects/${pid}/pages/reorder`, json({ ids })),
+  deletePages: (pid, ids) => req(`/api/projects/${pid}/pages/delete`, json({ ids })),
+  setPageJoin: (pid, pageId, kind, glue = 'none') =>
+    req(`/api/projects/${pid}/pages/${pageId}/join`, json({ kind, glue })),
+  setPageStatus: (pid, pageId, status) =>
+    req(`/api/projects/${pid}/pages/${pageId}/status`, json({ status })),
+  proposeJoins: (pid) => req(`/api/projects/${pid}/pages/propose-joins`, json({})),
+  buildFromPages: (pid) => req(`/api/projects/${pid}/pages/build`, json({})),
 
   queueOverview: () => req('/api/queue'),
   activeJob: (pid) => req(`/api/projects/${pid}/active-job`),

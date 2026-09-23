@@ -8,6 +8,7 @@ const ProjectPage = lazy(() => import('./pages/ProjectPage'))
 const ActivityPage = lazy(() => import('./pages/ActivityPage'))
 const ReaderPage = lazy(() => import('./pages/ReaderPage'))
 const GlossaryPage = lazy(() => import('./pages/GlossaryPage'))
+const PagesPage = lazy(() => import('./pages/PagesPage'))
 
 const NAV = [
   { to: '/', label: 'Library', end: true },
@@ -63,6 +64,7 @@ export default function App() {
           <Route path="/work/:pid" element={<ProjectPage />} />
           <Route path="/work/:pid/read/:index" element={<ReaderPage />} />
           <Route path="/work/:pid/glossary" element={<GlossaryPage />} />
+          <Route path="/work/:pid/pages" element={<PagesPage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </Suspense>

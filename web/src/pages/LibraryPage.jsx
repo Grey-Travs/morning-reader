@@ -4,7 +4,9 @@ import { api } from '../api'
 import Explained from '../components/Explained'
 import { countLabel, whenish } from '../format'
 
-// The shelf, plus the one ingestion path step 1 ships: paste text or drop a .txt.
+// The shelf, and the three ways a work gets onto it: pasted text or a .txt, a
+// Google Doc, or a stack of photographs. The third creates an EMPTY work and
+// hands you straight to its pages — there is nothing to split until they are read.
 
 const MODES = [
   { value: 'heading', label: 'Split on chapter headings',
@@ -56,7 +58,9 @@ export default function LibraryPage() {
       {adding && (
         <div className="mb-6">
           <AddWork
-            onAdded={(project) => navigate(`/work/${project.id}`)}
+            onAdded={(project) => navigate(project.ingest === 'images'
+              ? `/work/${project.id}/pages`
+              : `/work/${project.id}`)}
             onError={setError}
           />
         </div>
@@ -98,7 +102,7 @@ function AddWork({ onAdded, onError }) {
   const [kind, setKind] = useState('novel')
   const [mode, setMode] = useState('heading')
   const [text, setText] = useState('')
-  const [source, setSource] = useState('text')   // text | docs
+  const [source, setSource] = useState('text')   // text | docs | scans
   const [document, setDocument] = useState('')
   const [google, setGoogle] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -131,6 +135,8 @@ function AddWork({ onAdded, onError }) {
       let created
       if (source === 'docs') {
         created = await api.createFromDoc({ document, title, kind })
+      } else if (source === 'scans') {
+        created = await api.createFromScans({ title, kind })
       } else {
         const file = fileRef.current?.files?.[0]
         // A chosen file wins over the textarea: picking one and then not noticing the
@@ -168,7 +174,8 @@ function AddWork({ onAdded, onError }) {
       <fieldset className="mt-4">
         <legend className="mb-1 text-xs text-muted">Where is it coming from?</legend>
         <div className="flex flex-wrap gap-4 text-sm">
-          {[['text', 'Paste it, or a .txt file'], ['docs', 'A Google Doc']].map(
+          {[['text', 'Paste it, or a .txt file'], ['docs', 'A Google Doc'],
+            ['scans', 'Photographs or scans']].map(
             ([value, label]) => (
               <label key={value} className="flex items-center gap-2">
                 <input type="radio" name="source" value={value}
@@ -213,6 +220,13 @@ function AddWork({ onAdded, onError }) {
             </label>
           )}
         </div>
+      )}
+
+      {source === 'scans' && (
+        <p className="mt-4 text-sm text-muted">
+          The work is created empty and you are taken to its pages, where you add the
+          images. Nothing is read — or billed — until you ask for it.
+        </p>
       )}
 
       {source === 'text' && (

@@ -232,6 +232,28 @@ def _create_from_text(title: str, kind: str, text: str, mode: str,
     return {"project": project, "chapters": len(chapters)}
 
 
+class CreateScanProject(BaseModel):
+    title: str = ""
+    kind: str = pj.KIND_NOVEL
+
+
+@app.post("/api/projects/scan")
+def create_scan_project(req: CreateScanProject) -> dict:
+    """Create a project whose source is photographs or scans.
+
+    Unlike every other ingestion path this one creates a project with NO chapters:
+    the text does not exist yet, and will not until the pages have been read and
+    built. That is why `ingest` is stored rather than inferred — an empty project
+    whose source is a stack of photographs looks exactly like a failed text import,
+    and the two need entirely different things offered to the user.
+    """
+    try:
+        project = pj.create_project(req.title, kind=req.kind, ingest=pj.INGEST_IMAGES)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"project": project, "chapters": 0}
+
+
 @app.get("/api/projects/{pid}")
 def get_project(pid: str) -> dict:
     project, cfg = project_cfg(pid)

@@ -116,6 +116,14 @@ export default function ProjectPage() {
           <Link to={`/work/${pid}/glossary`} style={{ color: 'var(--accent)' }}>
             Glossary
           </Link>
+          {project.ingest === 'images' && (
+            <>
+              {' · '}
+              <Link to={`/work/${pid}/pages`} style={{ color: 'var(--accent)' }}>
+                Pages
+              </Link>
+            </>
+          )}
         </p>
       </div>
 
@@ -160,6 +168,17 @@ export default function ProjectPage() {
 
       <JobConsole events={events} queue={queue} live={live} running={running}
                   onResume={() => api.resume(pid).then(refresh)} />
+
+      {chapters.length === 0 && project.ingest === 'images' && (
+        <div className="card mt-5 p-8 text-center text-muted">
+          <p>This work is built from photographs, and none have been read yet.</p>
+          <p className="mt-2">
+            <Link to={`/work/${pid}/pages`} className="btn btn-primary no-underline">
+              Go to the pages
+            </Link>
+          </p>
+        </div>
+      )}
 
       <div className="card mt-5 overflow-hidden">
         <table className="w-full text-sm">
