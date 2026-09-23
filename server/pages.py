@@ -472,6 +472,74 @@ def line_counts(page: dict) -> dict:
             "untranslated": total - translated - stale, "undrawable": undrawable}
 
 
+# ---- manga chapters ----------------------------------------------------------
+# The same lifecycle a page has, one level up. Named separately rather than reusing the
+# page constants wholesale, because "reading" and "translating" are different work and
+# a console that said "reading" while translating would be lying.
+
+CHAPTER_NEW = ""                       # never translated
+CHAPTER_QUEUED = STATUS_QUEUED
+CHAPTER_RUNNING = "translating"
+CHAPTER_STATUSES = (CHAPTER_NEW, CHAPTER_QUEUED, CHAPTER_RUNNING, STATUS_OK,
+                    STATUS_NEEDS_CHECK, STATUS_FAILED)
+
+
+def find_chapter(doc: dict, index: int) -> dict | None:
+    for chapter in doc.get("chapters") or []:
+        if int(chapter.get("index") or 0) == int(index):
+            return chapter
+    return None
+
+
+def resting_chapter_status(chapter: dict) -> str:
+    """What a chapter should read as when its queued work is dropped.
+
+    Restoring to ``status`` itself would leave it on "queued" forever, because that is
+    what it was set to when the work was accepted — the same trap
+    :func:`resting_status` exists for on the page axis.
+    """
+    if chapter.get("at"):
+        return chapter.get("last_status") or STATUS_NEEDS_CHECK
+    return CHAPTER_NEW
+
+
+def set_chapter_status(doc: dict, index: int, status: str, **fields) -> dict | None:
+    chapter = find_chapter(doc, index)
+    if chapter is None:
+        return None
+    if status in (CHAPTER_QUEUED, CHAPTER_RUNNING) and chapter.get("status") not in (
+            CHAPTER_QUEUED, CHAPTER_RUNNING):
+        chapter["last_status"] = chapter.get("status", CHAPTER_NEW)
+    chapter["status"] = status
+    chapter.update(fields)
+    return chapter
+
+
+def chapter_counts(doc: dict, chapter: dict) -> dict:
+    """How much of this chapter has usable English on it."""
+    wanted = {str(i) for i in (chapter.get("page_ids") or [])}
+    counts = {"lines": 0, "translated": 0, "stale": 0, "untranslated": 0,
+              "undrawable": 0, "pages": 0, "unchecked_pages": 0,
+              "unmeasured_pages": 0, "silent_pages": 0}
+    for page in doc.get("pages", []):
+        if str(page.get("id")) not in wanted:
+            continue
+        counts["pages"] += 1
+        if page.get("status") == STATUS_NEEDS_CHECK:
+            counts["unchecked_pages"] += 1
+        if not (page.get("width") and page.get("height")):
+            counts["unmeasured_pages"] += 1
+        page_counts = line_counts(page)
+        if page_counts["lines"] == 0:
+            # A page with nothing said on it. Counted rather than ignored: in a manga
+            # it is usually a splash or an action beat, and "0 of 0 translated" reading
+            # as complete would hide a page that was never read at all.
+            counts["silent_pages"] += 1
+        for key, value in page_counts.items():
+            counts[key] += value
+    return counts
+
+
 def summary(doc: dict) -> dict:
     """Counts the pages screen reads, so it does not compute them five ways."""
     pages = doc.get("pages", [])

@@ -19,6 +19,7 @@ is expected to be quiet.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -35,7 +36,9 @@ from morning.chapter_files import (
 from morning.chapters import classify
 from morning.config import Config
 from morning.images import MAX_IMAGE_BYTES, inspect, unsupported_reason
-from morning.page_build import assemble, propose_join
+from morning.page_build import assemble, assemble_spans, propose_join
+from morning.pageread import TRANSLATED_KINDS, is_drawable, region_hash
+from morning.reading_order import propose_panels
 from morning.glossary import (
     VALID_TYPES, Glossary, GlossaryEntry, glossary_lock, load_pending, save_pending,
 )
@@ -165,13 +168,31 @@ def health() -> dict:
 
 # ---- projects ----------------------------------------------------------------
 
+def _project_totals(pid: str, cfg) -> dict:
+    """Everything this project has cost, wherever it was recorded.
+
+    A prose chapter's spend is in ``state.json``; a page read's and a manga
+    translation's are in ``pages.json``, because that file is keyed by page seq and
+    manga chapter and ``state.json`` is keyed by prose chapter index. Summing them here
+    is what stops a scanned work — which spends ALL of its money on the manifest side —
+    from reporting $0.00 everywhere the owner actually looks.
+    """
+    totals = dict(State.load(cfg.paths.state_file).totals() or {})
+    manifest = pages_mod.load_pages(pid).get("totals") or {}
+    for key, value in manifest.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            totals[key] = (totals.get(key) or 0) + value
+    if "cost_usd" in totals:
+        totals["cost_usd"] = round(float(totals["cost_usd"]), 6)
+    return totals
+
+
 @app.get("/api/projects")
 def list_projects() -> dict:
     out = []
     for project in pj.list_projects():
         cfg = pj.project_config(load_global_config(), project)
-        state = State.load(cfg.paths.state_file)
-        out.append({**project, "totals": state.totals()})
+        out.append({**project, "totals": _project_totals(project["id"], cfg)})
     return {"projects": out}
 
 
@@ -254,12 +275,40 @@ def create_scan_project(req: CreateScanProject) -> dict:
     return {"project": project, "chapters": 0}
 
 
+def _manga_chapter_rows(pid: str) -> list[dict]:
+    """A manga's chapters, in the shape the work page already renders.
+
+    ``class`` and ``paragraph_count`` are deliberately ABSENT. They are what the prose
+    UI keys on, and a row without them cannot be offered the prose Translate — the
+    refusal is structural rather than a check somebody has to remember.
+    """
+    doc = pages_mod.load_pages(pid)
+    rows = []
+    for chapter in doc.get("chapters") or []:
+        counts = pages_mod.chapter_counts(doc, chapter)
+        rows.append({
+            "index": int(chapter.get("index") or 0),
+            "title": chapter.get("title", ""),
+            "status": chapter.get("status", ""),
+            "pages": counts["pages"],
+            "lines": counts["lines"],
+            "translated": counts["translated"],
+            "stale": counts["stale"],
+            "unchecked_pages": counts["unchecked_pages"],
+            "silent_pages": counts["silent_pages"],
+            "error": chapter.get("error"),
+            "cost_usd": chapter.get("cost_usd", 0.0),
+        })
+    return rows
+
+
 @app.get("/api/projects/{pid}")
 def get_project(pid: str) -> dict:
     project, cfg = project_cfg(pid)
-    state = State.load(cfg.paths.state_file)
-    return {"project": project, "chapters": _chapter_rows(pid, cfg),
-            "totals": state.totals()}
+    rows = (_manga_chapter_rows(pid) if project.get("kind") == pj.KIND_MANGA
+            else _chapter_rows(pid, cfg))
+    return {"project": project, "chapters": rows,
+            "totals": _project_totals(pid, cfg)}
 
 
 class UpdateProject(BaseModel):
@@ -677,6 +726,47 @@ def propose_joins(pid: str) -> dict:
     return {"proposed": proposed}
 
 
+def _build_manga_chapters(pid: str, doc: dict) -> dict:
+    """Group a manga's pages into chapters, in pages.json and nowhere else.
+
+    A manga's chapters must NOT go through ``pj.save_source``. The prose path would
+    then be reachable: "Translate everything" would run ``process_chapter`` over
+    concatenated bubble text — paid, wrong, with no per-bubble mapping for the overlay
+    to draw — and ``prepare`` would write a record per chapter into ``state.json``,
+    which is keyed in the same integer space a page seq already occupies.
+
+    Re-building keeps a chapter's translation status when its pages have not changed,
+    so adding a seam near the end of a volume does not offer to re-bill the chapters
+    before it.
+    """
+    built = assemble_spans(doc.get("pages") or [])
+    if not built.spans:
+        raise HTTPException(400, "There are no pages to build chapters from yet.")
+
+    previous = {tuple(c.get("page_ids") or []): c for c in (doc.get("chapters") or [])}
+    chapters = []
+    for span in built.spans:
+        record = span.to_dict()
+        kept = previous.get(tuple(record["page_ids"]))
+        if kept is not None:
+            # Same pages, same English: carry the translation forward rather than
+            # presenting a paid-for chapter as untranslated.
+            for key in ("status", "at", "attempts", "lines", "missing", "order_hash",
+                        "chunks", "warnings", "usage", "cost_usd", "last_status"):
+                if key in kept:
+                    record[key] = kept[key]
+        else:
+            record["status"] = pages_mod.CHAPTER_NEW
+        chapters.append(record)
+
+    with pages_mod.mutate_pages(pid) as fresh:
+        fresh["chapters"] = chapters
+        fresh["build"] = {"at": pages_mod.now_iso(), "chapters": len(chapters),
+                          "pages": built.pages_used, "warnings": built.warnings}
+    return {"chapters": len(chapters), "pages_used": built.pages_used,
+            "warnings": built.warnings}
+
+
 @app.post("/api/projects/{pid}/pages/build")
 def build_from_pages(pid: str) -> dict:
     """Turn the read pages into this project's chapters.
@@ -689,6 +779,10 @@ def build_from_pages(pid: str) -> dict:
         raise HTTPException(409, "Something is still running on this project. Stop it "
                                  "first, then build.")
     doc = pages_mod.load_pages(pid)
+
+    if project.get("kind") == pj.KIND_MANGA:
+        return _build_manga_chapters(pid, doc)
+
     usable = [p for p in doc.get("pages", [])
               if p.get("status") in pages_mod.APPROVED_STATUSES]
     if not usable:
@@ -708,9 +802,235 @@ def build_from_pages(pid: str) -> dict:
             "warnings": built.warnings}
 
 
+# ---- manga -------------------------------------------------------------------
+#
+# A manga project never writes source.json. Its chapters are runs of pages recorded in
+# pages.json, its English is per-region, and its reader is the overlay — so every route
+# below is a fork rather than a generalisation of the prose ones. The refusals matter
+# as much as the routes: a manga reaching the prose translate path would spend the
+# owner's allowance producing a wall of text with no per-bubble mapping, which the
+# overlay cannot draw and which nothing can recover.
+
+def _require_manga(pid: str) -> tuple[dict, object]:
+    project, cfg = project_cfg(pid)
+    if project.get("kind") != pj.KIND_MANGA:
+        raise HTTPException(404, "This work is a novel. Its chapters are read in the "
+                                 "ordinary reader.")
+    return project, cfg
+
+
+class MangaTranslateRequest(BaseModel):
+    indices: list[int] | None = None   # None = every chapter that still needs it
+    force: bool = False
+
+
+@app.post("/api/projects/{pid}/manga/translate")
+async def translate_manga(pid: str,
+                          req: MangaTranslateRequest = MangaTranslateRequest()) -> dict:
+    """Queue manga chapters for translation. Must be async: it starts a worker."""
+    _project, cfg = _require_manga(pid)
+    doc = pages_mod.load_pages(pid)
+    chapters = doc.get("chapters") or []
+    if not chapters:
+        raise HTTPException(400, "This manga has no chapters yet. Build them from the "
+                                 "pages first.")
+
+    wanted = {int(i) for i in (req.indices or [])}
+    picked: list[int] = []
+    for chapter in chapters:
+        index = int(chapter.get("index") or 0)
+        if wanted:
+            if index in wanted:
+                picked.append(index)
+            continue
+        # A sweep takes only chapters that are not already done. Re-translating one
+        # that is, is what `force` is for, and doing it by default would re-bill the
+        # whole volume.
+        if req.force or chapter.get("status") != pages_mod.STATUS_OK:
+            picked.append(index)
+
+    if not picked:
+        return {"queued": [], "job_id": None}
+
+    with pages_mod.mutate_pages(pid) as fresh:
+        for index in picked:
+            pages_mod.set_chapter_status(fresh, index, pages_mod.CHAPTER_QUEUED)
+
+    items = [(i, req.force, task_mod.TASK_TRANSLATE_SCRIPT) for i in picked]
+    return jobs.enqueue(pid, cfg, items)
+
+
+class OrderRequest(BaseModel):
+    # None clears a saved order and returns the page to the model's. That is the only
+    # way back, and it is deliberately explicit: a human's order is never reverted
+    # silently, but it can be revoked on purpose.
+    ids: list[str] | None = None
+
+
+@app.post("/api/projects/{pid}/pages/{page_id}/order")
+def set_page_order(pid: str, page_id: str,
+                   req: OrderRequest = OrderRequest()) -> dict:
+    """Record a human's reading order for one page.
+
+    The WHOLE permutation is sent, never a delta — the same rule the page reorder
+    already follows, one level down. The server refuses anything that is not a
+    permutation, so a delta could not corrupt the book, but it would look like a
+    broken button.
+    """
+    require_project(pid)
+    with pages_mod.mutate_pages(pid) as doc:
+        page = pages_mod.find_page(doc, page_id)
+        if page is None:
+            raise HTTPException(404, "There is no page with that id in this project.")
+        if not pages_mod.set_order(page, req.ids):
+            raise HTTPException(400, "That ordering does not list every region on the "
+                                     "page exactly once, so it was not applied.")
+        check = dict(page.get("order_check") or {})
+    return {"ok": True, "order_check": check}
+
+
+class LineEdit(BaseModel):
+    english: str | None = None
+    speaker: str | None = None
+
+
+@app.post("/api/projects/{pid}/pages/{page_id}/lines/{region_id}")
+def edit_line(pid: str, page_id: str, region_id: str,
+              req: LineEdit = LineEdit()) -> dict:
+    """Edit one translated line as a human.
+
+    Whatever is set here is marked ``user`` and a later re-translate never overwrites
+    it — the same rule as ``join_prev_source`` and ``order_source``. Editing the
+    English also re-stamps the line's ``source_hash`` against the words that are on the
+    page NOW, because the person is looking at those words: without that their edit
+    would be born stale and marked as needing attention it does not need.
+    """
+    require_project(pid)
+    with pages_mod.mutate_pages(pid) as doc:
+        page = pages_mod.find_page(doc, page_id)
+        if page is None:
+            raise HTTPException(404, "There is no page with that id in this project.")
+        read, _note = pages_mod.effective_read(page)
+        region = next((r for r in read.regions if r.id == region_id), None)
+        if region is None:
+            raise HTTPException(404, "There is no region with that id on this page.")
+
+        fields: dict = {}
+        if req.english is not None:
+            fields["english"] = req.english
+            fields["english_source"] = "user"
+            fields["source_hash"] = region_hash(region)
+        if req.speaker is not None:
+            fields["speaker"] = req.speaker
+            fields["speaker_source"] = "user"
+        if not fields:
+            raise HTTPException(400, "There was nothing to change in that request.")
+        line = dict(pages_mod.set_line(page, region_id, **fields))
+    return {"line": line}
+
+
+def _manga_page_payload(page: dict) -> dict:
+    """One page as the overlay and the script view need it."""
+    read, note = pages_mod.effective_read(page)
+    lines = page.get("lines")
+    lines = lines if isinstance(lines, dict) else {}
+    panels = propose_panels(read.regions)
+    panel_of = {rid: i + 1 for i, panel in enumerate(panels) for rid in panel}
+
+    regions = []
+    for region in read.in_order():
+        record = lines.get(region.id)
+        record = record if isinstance(record, dict) else {}
+        english = str(record.get("english") or "")
+        regions.append({
+            "id": region.id,
+            "box": [round(float(v), 6) for v in region.box],
+            "kind": region.kind,
+            "order": region.order,
+            "text": region.text,
+            "panel": panel_of.get(region.id, 0),
+            "english": english,
+            "english_source": record.get("english_source", ""),
+            "speaker": record.get("speaker", ""),
+            "speaker_source": record.get("speaker_source", ""),
+            "translatable": region.kind in TRANSLATED_KINDS,
+            # Both computed server-side so the reader's "N lines could not be placed"
+            # banner and what it actually draws cannot disagree. The browser mirrors
+            # `is_drawable`, and tests/test_geometry_parity.py pins the pair.
+            "drawable": is_drawable(region.box),
+            "stale": bool(english.strip())
+            and record.get("source_hash") != region_hash(region),
+        })
+
+    return {
+        "id": page.get("id"),
+        "seq": page.get("seq"),
+        "name": page.get("name", ""),
+        "status": page.get("status", ""),
+        "width": page.get("width", 0),
+        "height": page.get("height", 0),
+        "regions": regions,
+        "panels": panels,
+        "order_source": read.order_source,
+        "order_note": note,
+        "order_check": pages_mod.order_check(page),
+        "counts": pages_mod.line_counts(page),
+    }
+
+
+@app.get("/api/projects/{pid}/manga/{index}")
+def read_manga_chapter(pid: str, index: int) -> dict:
+    """One manga chapter as the reader and the script view need it."""
+    _project, _cfg = _require_manga(pid)
+    doc = pages_mod.load_pages(pid)
+    chapter = pages_mod.find_chapter(doc, index)
+    if chapter is None:
+        raise HTTPException(404, "There is no chapter with that number in this manga.")
+
+    by_id = {str(p.get("id")): p for p in doc.get("pages", [])}
+    wanted = [str(i) for i in (chapter.get("page_ids") or [])]
+    pages_out = [_manga_page_payload(by_id[i]) for i in wanted if i in by_id]
+
+    indices = [int(c.get("index") or 0) for c in (doc.get("chapters") or [])]
+    position = indices.index(index) if index in indices else -1
+
+    counts = pages_mod.chapter_counts(doc, chapter)
+    warnings = list(chapter.get("warnings") or [])
+    # A reordering does not stale a line — no bubble's Japanese changed — but a line
+    # translated believing it followed line A now follows line B, and Japanese subject
+    # omission means that CAN change the English. Worth saying; not worth re-billing.
+    current = hashlib.sha256("|".join(
+        f"{p['seq']}:{r['id']}" for p in pages_out for r in p["regions"]
+        if r["translatable"]).encode()).hexdigest()
+    order_changed = bool(chapter.get("order_hash")) and \
+        chapter["order_hash"] != current
+
+    return {
+        "index": index,
+        "title": chapter.get("title", ""),
+        "status": chapter.get("status", ""),
+        "pages": pages_out,
+        "counts": counts,
+        "warnings": warnings,
+        "order_changed": order_changed,
+        "missing": chapter.get("missing", []),
+        "cost_usd": chapter.get("cost_usd", 0.0),
+        "prev": indices[position - 1] if position > 0 else None,
+        "next": (indices[position + 1]
+                 if 0 <= position and position + 1 < len(indices) else None),
+    }
+
+
 # ---- reading -----------------------------------------------------------------
 
 def _require_chapter(pid: str, index: int) -> tuple[list, object]:
+    # A manga has no prose chapters at all, so this would 404 anyway — but with
+    # "there is no chapter with that number", which reads as data loss rather than as
+    # the reader pointing somewhere else.
+    project = pj.get_project(pid)
+    if project is not None and project.get("kind") == pj.KIND_MANGA:
+        raise HTTPException(404, "This work is a manga. Its chapters are read with "
+                                 "the English over the art, not as prose.")
     chapters = pj.load_source(pid)
     chapter = next((c for c in chapters if c.index == index), None)
     if chapter is None:
@@ -888,9 +1208,18 @@ class RunRequest(BaseModel):
 @app.post("/api/projects/{pid}/run")
 async def start_run(pid: str, req: RunRequest = RunRequest()) -> dict:
     """Queue work. Must be async: starting a worker schedules an asyncio task."""
-    _, cfg = project_cfg(pid)
+    project, cfg = project_cfg(pid)
     if req.kind not in task_mod.TASK_KINDS:
         raise HTTPException(400, f"There is nothing called {req.kind!r} to do.")
+    # Refused by NAME, not by accident. Today a manga happens to 400 here because its
+    # source.json is empty — which is the right outcome reached by luck, and luck is
+    # not good enough on the one route that spends the owner's allowance. The prose
+    # path would translate concatenated bubble text: paid, wrong, and with no
+    # per-bubble mapping for the overlay to draw.
+    if project.get("kind") == pj.KIND_MANGA:
+        raise HTTPException(400, "This is a manga. Its pages are read on the pages "
+                                 "screen and its chapters are translated from there — "
+                                 "the prose pipeline does not apply to it.")
     chapters = pj.load_source(pid)
     if not chapters:
         raise HTTPException(400, "This project has no source text yet.")

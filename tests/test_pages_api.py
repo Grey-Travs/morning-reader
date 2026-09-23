@@ -199,14 +199,38 @@ def test_reading_a_page_stores_its_regions(client, project):
 
 def test_the_page_spend_is_recorded_in_the_manifest_not_state_json(client, project):
     """state.json is keyed by CHAPTER index; a page sequence number written there
-    would corrupt a real chapter's totals."""
+    would corrupt a real chapter's totals.
+
+    Asserted against state.json directly rather than through the project endpoint.
+    Step 4 made that endpoint SUM both files, because a scanned work spends all of its
+    money on the manifest side and was therefore reporting $0.00 everywhere the owner
+    actually looks. Where the number is stored and what the owner is shown are two
+    different claims, and only the first one is this test's business.
+    """
+    from morning.state import State
+    from server.app import project_cfg
+
     _upload(client, project, jpeg(W, H))
     client.post(f"/api/projects/{project}/pages/read", json={})
     _await_idle(client, project)
 
     summary = client.get(f"/api/projects/{project}/pages").json()["summary"]
     assert summary["totals"]["cost_usd"] == 0.02
-    assert client.get(f"/api/projects/{project}").json()["totals"]["cost_usd"] == 0.0
+
+    cfg = project_cfg(project)[1]
+    assert State.load(cfg.paths.state_file).chapters == {}
+
+
+def test_the_project_reports_what_its_pages_cost(client, project):
+    """The other half. Page spend is real money and it is all a scanned work has, so a
+    project header showing $0.00 would be telling the owner their reading was free."""
+    _upload(client, project, jpeg(W, H))
+    client.post(f"/api/projects/{project}/pages/read", json={})
+    _await_idle(client, project)
+
+    assert client.get(f"/api/projects/{project}").json()["totals"]["cost_usd"] == 0.02
+    listed = client.get("/api/projects").json()["projects"]
+    assert next(p for p in listed if p["id"] == project)["totals"]["cost_usd"] == 0.02
 
 
 def test_a_page_the_reader_was_unsure_about_goes_to_a_human(client, project,

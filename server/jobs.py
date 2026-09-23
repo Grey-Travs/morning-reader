@@ -30,6 +30,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi.concurrency import run_in_threadpool
@@ -429,56 +430,198 @@ def _set_page_status(pid: str, page_id: str, status: str, **fields) -> None:
         pages_mod.set_status(doc, page_id, status, **fields)
 
 
-def release_queued_pages(pid: str, seqs: set[int]) -> None:
-    """Put pages whose work will now never run back to what they were resting at.
+def _set_chapter_status(pid: str, index: str, status: str, **fields) -> None:
+    with pages_mod.mutate_pages(pid) as doc:
+        pages_mod.set_chapter_status(doc, int(index or 0), status, **fields)
 
-    Without this they sit on "queued" or "reading" forever, and the default sweep —
-    which only picks up pages that have not been read — can never see them again.
+
+def _apply_script_result(pid: str, index: str, fields: dict) -> dict:
+    """Merge a finished manga translation into pages.json and return the chapter.
+
+    **One lock, one atomic write, both the lines and the chapter record.** Writing them
+    separately would leave a window in which the chapter says it is translated and its
+    pages have no English on them — and a crash inside that window makes the state
+    permanent.
     """
-    if not seqs:
+    chapter_fields = dict(fields.get("chapter") or {})
+    writes = fields.get("lines") or {}
+    usage = fields.get("_usage") or {}
+    cost = float(fields.get("_cost") or 0.0)
+    status = chapter_fields.pop("status", pages_mod.STATUS_OK)
+
+    with pages_mod.mutate_pages(pid) as doc:
+        by_id = {str(p.get("id")): p for p in doc.get("pages", [])}
+        for page_id, lines in writes.items():
+            page = by_id.get(str(page_id))
+            if page is None:
+                continue  # deleted while the call was in flight
+            existing = page.get("lines")
+            existing = existing if isinstance(existing, dict) else {}
+            for region_id, values in lines.items():
+                prior = existing.get(region_id)
+                prior = prior if isinstance(prior, dict) else {}
+                payload = dict(values)
+                # A human's line is NEVER overwritten by a re-translate — the same rule
+                # as `set_join`'s user flag and `order_source`. Their English can still
+                # go stale on its own if the Japanese changes; what it cannot do is
+                # vanish because the chapter was translated again.
+                if prior.get("english_source") == "user":
+                    for key in ("english", "english_source", "source_hash"):
+                        payload.pop(key, None)
+                if prior.get("speaker_source") == "user":
+                    payload.pop("speaker", None)
+                    payload.pop("speaker_source", None)
+                if payload:
+                    pages_mod.set_line(page, region_id, **payload)
+
+        record = pages_mod.set_chapter_status(
+            doc, int(index or 0), status, **chapter_fields) or {}
+        totals = doc.setdefault("totals", {})
+        totals["cost_usd"] = round(float(totals.get("cost_usd") or 0.0) + cost, 6)
+        for key, value in usage.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                totals[key] = (totals.get(key) or 0) + value
+        return dict(record)
+
+
+def release_queued_items(pid: str, items: set[tuple[int, str]]) -> None:
+    """Put work that will now never run back to what it was resting at.
+
+    Without this a page sits on "queued" or "reading" forever, and the default sweep —
+    which only picks up pages that have not been read — can never see it again.
+
+    **It takes the KIND, not just the index, and that is load-bearing.** There are two
+    axes in the manifest now: a page's ``status`` (has it been read) and a manga
+    chapter's ``status`` (has it been translated). They are different records with
+    different lifecycles, and a release that knew only about pages would leave every
+    translate-queued chapter reading "translating" with no job running — which the user
+    reads as work in flight, so they never press Translate again and those pages never
+    get English. That is the read-side bug this function was written to fix,
+    reintroduced one axis over, so the callers keep the kind all the way here.
+    """
+    if not items:
+        return
+    page_seqs = {i for i, k in items if k in task_mod.PAGE_TASK_KINDS}
+    chapters = {i for i, k in items if k in task_mod.SCRIPT_TASK_KINDS}
+    if not page_seqs and not chapters:
         return
     with pages_mod.mutate_pages(pid) as doc:
         for page in doc.get("pages", []):
-            if page.get("seq") in seqs and page.get("status") in (
+            if page.get("seq") in page_seqs and page.get("status") in (
                     pages_mod.STATUS_QUEUED, pages_mod.STATUS_RUNNING):
                 page["status"] = pages_mod.resting_status(page)
+        for chapter in doc.get("chapters") or []:
+            if int(chapter.get("index") or 0) in chapters and chapter.get(
+                    "status") in (pages_mod.CHAPTER_QUEUED,
+                                  pages_mod.CHAPTER_RUNNING):
+                chapter["status"] = pages_mod.resting_chapter_status(chapter)
 
 
-async def _run_page_item(job: Job, context, cfg: Config, index: int, force: bool,
-                         kind: str, loop, strikes: int) -> tuple[int, str]:
-    """Run one queued PAGE item on the shared worker.
+@dataclass(frozen=True)
+class _Store:
+    """How one kind of manifest record is found, labelled, marked and written back.
 
-    Pages ride the same Job as chapters so Stop, the live console, Activity and the
-    rate-limit auto-resume all work without being reimplemented — but their
-    bookkeeping lives in pages.json and ``index`` is a page SEQUENCE number, not a
-    chapter index.
+    The rate-limit policy, the abort path and the refuse/fail shapes below exist ONCE
+    and serve both axes through this. A second copy of that policy for manga chapters
+    would drift, and a drifted copy of the thing that decides when to stop spending
+    money is precisely the class of bug this codebase is built to avoid.
+    """
+
+    id_field: str                      # what the event calls this record's id
+    find: Callable                     # (doc, index) -> record | None
+    identify: Callable                 # (record) -> str
+    resting: Callable                  # (record) -> the status to fall back to
+    label: Callable                    # (record, index) -> str
+    running: str
+    failed: str
+    set_status: Callable               # (pid, record_id, status, **fields) -> None
+    apply: Callable                    # (pid, record_id, fields) -> updated record
+    task: Callable                     # the blocking task function
+    finished_extra: Callable           # (record) -> dict of event fields
+
+
+def _page_finished_extra(record: dict) -> dict:
+    read = record.get("read") or {}
+    return {"regions": len(read.get("regions") or []),
+            "confidence": (record.get("ocr") or {}).get("confidence", ""),
+            "chars": len(pages_mod.page_text(record))}
+
+
+def _chapter_finished_extra(record: dict) -> dict:
+    return {"lines": int(record.get("lines") or 0),
+            "missing": len(record.get("missing") or []),
+            "chunks": int(record.get("chunks") or 1)}
+
+
+PAGE_STORE = _Store(
+    id_field="page_id",
+    find=lambda doc, index: pages_mod.find_by_seq(doc, index),
+    identify=lambda record: str(record.get("id") or ""),
+    resting=pages_mod.resting_status,
+    label=lambda record, index: record.get("name") or f"Page {index}",
+    running=pages_mod.STATUS_RUNNING,
+    failed=pages_mod.STATUS_FAILED,
+    set_status=lambda pid, rid, status, **f: _set_page_status(pid, rid, status, **f),
+    apply=lambda pid, rid, fields: _apply_page_result(pid, rid, fields),
+    task=task_mod.read_page_task,
+    finished_extra=_page_finished_extra,
+)
+
+CHAPTER_STORE = _Store(
+    id_field="chapter_index",
+    find=lambda doc, index: pages_mod.find_chapter(doc, index),
+    identify=lambda record: str(record.get("index") or ""),
+    resting=pages_mod.resting_chapter_status,
+    label=lambda record, index: record.get("title") or f"Chapter {index}",
+    running=pages_mod.CHAPTER_RUNNING,
+    failed=pages_mod.STATUS_FAILED,
+    set_status=lambda pid, rid, status, **f: _set_chapter_status(pid, rid, status, **f),
+    apply=lambda pid, rid, fields: _apply_script_result(pid, rid, fields),
+    task=task_mod.translate_script_task,
+    finished_extra=_chapter_finished_extra,
+)
+
+
+def _store_for(kind: str) -> _Store:
+    return CHAPTER_STORE if kind in task_mod.SCRIPT_TASK_KINDS else PAGE_STORE
+
+
+async def _run_manifest_item(job: Job, context, cfg: Config, index: int, force: bool,
+                             kind: str, loop, strikes: int) -> tuple[int, str]:
+    """Run one queued item whose bookkeeping lives in pages.json.
+
+    Pages and manga chapters ride the same Job as prose chapters, so Stop, the live
+    console, Activity and the rate-limit auto-resume all work without being
+    reimplemented — but their state lives in the manifest and ``index`` is a page
+    SEQUENCE number or a manga chapter number, never a prose chapter index.
 
     Returns ``(strikes, outcome)`` where outcome is ``continue | break | return``.
     """
+    store = _store_for(kind)
     key = task_mod.queue_key(index, kind)
     doc = pages_mod.load_pages(job.pid)
-    page = pages_mod.find_by_seq(doc, index)
-    if page is None:
+    record = store.find(doc, index)
+    if record is None:
         job.queued.discard(key)
         job.current = None
         return strikes, "continue"
 
-    page_id = str(page.get("id") or "")
-    # NOT page["status"] — that already reads "queued", because this item was marked
-    # when the work was accepted. Restoring it would leave the page queued forever.
-    resting = pages_mod.resting_status(page)
-    label = page.get("name") or f"Page {index}"
+    record_id = store.identify(record)
+    # NOT record["status"] — that already reads "queued", because this item was marked
+    # when the work was accepted. Restoring it would leave it queued forever.
+    resting = store.resting(record)
+    label = store.label(record, index)
 
     job.abort.clear()
     job.live = {"index": index, "title": label, "chars": 0, "kind": kind,
-                "page_id": page_id, "done": 0, "total": 1,
+                store.id_field: record_id, "done": 0, "total": 1,
                 "started_at": time.time()}
     progress, flush = _build_progress(job, loop)
     context.progress = progress
     context.hooks = _build_stream_hooks(job, loop)
-    _set_page_status(job.pid, page_id, pages_mod.STATUS_RUNNING)
+    store.set_status(job.pid, record_id, store.running)
     job.publish({"type": "start", "index": index, "title": label, "kind": kind,
-                 "label": task_mod.describe(kind, index), "page_id": page_id,
+                 "label": task_mod.describe(kind, index), store.id_field: record_id,
                  "billed": kind in task_mod.BILLED_TASK_KINDS,
                  "chars": 0, "units": 1, "started_at": job.live["started_at"],
                  "model": cfg.anthropic.model, "effort": cfg.anthropic.effort})
@@ -487,22 +630,23 @@ async def _run_page_item(job: Job, context, cfg: Config, index: int, force: bool
         job.live = None
         job.current = None
         job.publish({"type": "item", "index": index, "kind": kind,
-                     "page_id": page_id, "title": label, "status": status, **extra})
+                     store.id_field: record_id, "title": label, "status": status,
+                     **extra})
 
     try:
-        fields = await run_in_threadpool(task_mod.read_page_task, page, context)
+        fields = await run_in_threadpool(store.task, record, context)
     except TaskAborted:
         flush()
-        _set_page_status(job.pid, page_id, resting)
+        store.set_status(job.pid, record_id, resting)
         job.queued.discard(key)
         finished(resting, aborted=True)
         return strikes, ("break" if job.cancelled else "continue")
     except RateLimited as exc:
         flush()
         job.live = None
-        # Nothing was written, so the page simply goes back to what it was and is
-        # re-queued at the head to be retried when the window refreshes.
-        _set_page_status(job.pid, page_id, resting)
+        # Nothing was written, so it simply goes back to what it was and is re-queued
+        # at the head to be retried when the window refreshes.
+        store.set_status(job.pid, record_id, resting)
         job.put_back((index, force, kind))
         job.current = None
         strikes += 1
@@ -525,27 +669,24 @@ async def _run_page_item(job: Job, context, cfg: Config, index: int, force: bool
         return strikes, "continue"
     except TaskRefused as exc:
         flush()
-        _set_page_status(job.pid, page_id, resting)
+        store.set_status(job.pid, record_id, resting)
         job.queued.discard(key)
         finished(resting, refused=True, error=str(exc))
         return 0, "continue"
-    except Exception as exc:  # isolation: one bad page never kills the queue
+    except Exception as exc:  # isolation: one bad item never kills the queue
         flush()
-        _set_page_status(job.pid, page_id, pages_mod.STATUS_FAILED,
+        store.set_status(job.pid, record_id, store.failed,
                          error=f"{type(exc).__name__}: {exc}")
         job.queued.discard(key)
-        finished(pages_mod.STATUS_FAILED, error=str(exc),
+        finished(store.failed, error=str(exc),
                  explain=errors.as_dict(errors.explain(exc)))
         return 0, "continue"
 
     flush()
-    record = _apply_page_result(job.pid, page_id, fields)
+    updated = store.apply(job.pid, record_id, fields)
     job.queued.discard(key)
-    read = record.get("read") or {}
-    finished(record.get("status", pages_mod.STATUS_NEEDS_CHECK),
-             regions=len(read.get("regions") or []),
-             confidence=(record.get("ocr") or {}).get("confidence", ""),
-             chars=len(pages_mod.page_text(record)))
+    finished(updated.get("status", pages_mod.STATUS_NEEDS_CHECK),
+             **store.finished_extra(updated))
     return 0, "continue"
 
 
@@ -582,9 +723,9 @@ async def _run_worker(job: Job, cfg: Config) -> None:
         # A page item's index is a page SEQUENCE number, so it must never be looked up
         # in the chapter map below — after a build, page 5 and chapter 5 both exist and
         # are different things.
-        if kind in task_mod.PAGE_TASK_KINDS:
+        if kind in task_mod.MANIFEST_TASK_KINDS:
             context.pid = job.pid
-            strikes, outcome = await _run_page_item(
+            strikes, outcome = await _run_manifest_item(
                 job, context, cfg, index, force, kind, loop, strikes)
             if outcome == "return":
                 return
@@ -776,15 +917,20 @@ async def _run_worker_guarded(job: Job, cfg: Config) -> None:
         # through a page, that page is the ONE item not in the pending queue — so
         # draining alone released everything except the page actually mid-flight,
         # which then sat on "reading" forever.
-        in_flight = job.current if job.kind in task_mod.PAGE_TASK_KINDS else None
+        # The kind travels with the index. Collapsing the drain to bare ints here is
+        # what left the manifest's second axis stranded — see release_queued_items.
+        in_flight = ((job.current, job.kind)
+                     if job.kind in task_mod.MANIFEST_TASK_KINDS
+                     and job.current is not None else None)
         job.live = None
         job.current = None
-        stranded = {i for i, _f, k in job.drain() if k in task_mod.PAGE_TASK_KINDS}
+        stranded = {(i, k) for i, _f, k in job.drain()
+                    if k in task_mod.MANIFEST_TASK_KINDS}
         if in_flight is not None:
             stranded.add(in_flight)
         if stranded:
             try:
-                release_queued_pages(job.pid, stranded)
+                release_queued_items(job.pid, stranded)
             except Exception:  # noqa: BLE001 — cleanup must not mask the real error
                 pass
         job.done = True
@@ -877,10 +1023,11 @@ def cancel(pid: str, *, stop_current: bool = False) -> dict:
     if job is None:
         return {"ok": True, "current": None, "pending": [], "stopped": None}
 
-    dropped = {i for i, _f, k in job.drain() if k in task_mod.PAGE_TASK_KINDS}
+    dropped = {(i, k) for i, _f, k in job.drain()
+               if k in task_mod.MANIFEST_TASK_KINDS}
     if dropped:
         try:
-            release_queued_pages(pid, dropped)
+            release_queued_items(pid, dropped)
         except Exception:  # noqa: BLE001 — a failed release must not fail the cancel
             pass
     stopped = None
