@@ -57,6 +57,40 @@ def _replace_with_retry(src: Path, dst: Path) -> None:
             delay = min(delay * 2, _BACKOFF_MAX)
 
 
+def _retrying(read):
+    """Run a read, riding out a momentary sharing violation.
+
+    Only ``PermissionError`` is retried — that is what Windows raises for a sharing
+    violation. A missing file or a bad path cannot be fixed by waiting.
+    """
+    delay = _BACKOFF
+    for attempt in range(_ATTEMPTS):
+        try:
+            return read()
+        except PermissionError:
+            if attempt == _ATTEMPTS - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, _BACKOFF_MAX)
+    raise OSError("unreachable")  # pragma: no cover
+
+
+def read_text_retrying(path: str | Path, encoding: str = "utf-8") -> str:
+    """Read a file's text, riding out a momentary sharing violation.
+
+    The mirror of :func:`_replace_with_retry`, and the asymmetry between them WAS a
+    bug. The write side already pays to survive an antivirus or a file-sync client
+    holding a file open for a moment. The read side gave up instantly — and a read
+    that gives up is the more dangerous of the two, because every loader here then
+    degraded to "empty" and its caller saved that emptiness back over the real file.
+
+    So a read failure must be loud. Callers catch a PARSE error (the file is genuinely
+    corrupt, degrade and quarantine) but must let this one out.
+    """
+    path = Path(path)
+    return _retrying(lambda: path.read_text(encoding=encoding))
+
+
 def quarantine_unreadable(path: str | Path) -> Path | None:
     """Preserve a file that EXISTS but could not be parsed, before anything overwrites it.
 
@@ -79,7 +113,13 @@ def quarantine_unreadable(path: str | Path) -> Path | None:
     """
     path = Path(path)
     try:
-        data = path.read_bytes()
+        # Retrying, for the same reason the write side does. Without it this function
+        # failed in precisely the case it exists for: the caller reached here BECAUSE
+        # the file could not be read, so a single non-retrying read here hit the same
+        # sharing violation and preserved nothing. Callers now only reach this on a
+        # PARSE failure, where the bytes are readable — but a retry costs nothing on a
+        # path that is already an except branch.
+        data = _retrying(path.read_bytes)
     except OSError:
         return None  # unreadable at the byte level too — nothing we can preserve
     if not data:

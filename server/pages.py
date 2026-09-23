@@ -30,7 +30,9 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from morning.atomic import atomic_write_json, quarantine_unreadable
+from morning.atomic import (
+    atomic_write_json, quarantine_unreadable, read_text_retrying,
+)
 from morning.images import ImageInfo
 from morning.pageread import (
     GLUE_NONE, JOIN_KINDS, PROSE_KINDS, TRANSLATED_KINDS, apply_text_order, flatten,
@@ -133,19 +135,27 @@ def new_doc() -> dict:
 
 
 def load_pages(pid: str) -> dict:
-    """Read the manifest. A missing or corrupt file reads as empty and never raises —
-    one bad file must not take down the project (the same rule as State and Glossary).
+    """Read the manifest.
+
+    A missing or CORRUPT file reads as empty — one bad file must not take down the
+    project (the same rule as State and Glossary). A file that cannot be READ does
+    not: that raises, because "I could not open it" and "it is empty" are different
+    claims, and only one of them is safe to save back.
     """
     path = pages_file(pid)
     if not path.exists():
         return new_doc()
+    # Could not READ it — see morning/state.py for the full reasoning. Degrading here
+    # is what would turn a momentary sharing violation into the permanent loss of every
+    # page transcribed from a photo, because `mutate_pages` would save the empty
+    # document straight back over it. The read retries and then RAISES; `mutate_pages`
+    # never reaches its save when the body raises, which is the point.
+    raw = read_text_retrying(path)
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
-        # Degrading to empty keeps one bad file from taking down the project — but the
-        # caller then mutates this and saves it back, which would turn a MOMENTARY
-        # read failure into the permanent loss of every page transcribed from a photo.
-        # Keep the bytes first.
+        doc = json.loads(raw) if raw.strip() else {}
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        # Could not PARSE it: the file really is corrupt. Keep the bytes aside and
+        # degrade, so one bad file cannot take the whole project down.
         quarantine_unreadable(path)
         return new_doc()
     if not isinstance(doc, dict):

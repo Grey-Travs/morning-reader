@@ -16,7 +16,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .atomic import atomic_write_json, quarantine_unreadable
+from .atomic import atomic_write_json, quarantine_unreadable, read_text_retrying
 
 # Lifecycle. Step 1 reaches `prepared`; the translate pipeline (step 2) adds the rest,
 # which is why they are declared here now — `DONE_STATUSES` has to be a single list
@@ -66,17 +66,25 @@ class State:
         path = Path(path)
         if not path.exists():
             return cls()
+        # Two different failures, and conflating them was a bug that could erase a
+        # whole novel's history.
+        #
+        # **Could not READ it** — an antivirus or a file-sync client holding it open
+        # for a moment, which is ordinary on Windows. That is not the same as "it is
+        # empty", and degrading here is how a momentary failure became permanent: the
+        # caller mutates the empty state and ``mutate_state`` saves it back, erasing
+        # every chapter's status, usage and cost, after which the novel reads as
+        # entirely untranslated and re-bills to redo it. So the read retries (see
+        # ``atomic.read_text_retrying``) and then RAISES. ``mutate_state`` never
+        # reaches its save when the body raises, which is exactly the point.
+        #
+        # **Could not PARSE it** — truncated or garbled, e.g. the process was killed
+        # mid-write. The file really is unusable, so keep the bytes aside and start
+        # fresh rather than taking the whole library down for one bad file.
+        raw = read_text_retrying(path)
         try:
-            raw = path.read_text(encoding="utf-8")
             data = json.loads(raw) if raw.strip() else {}
-        except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
-            # A truncated/garbled state.json (e.g. the process was killed mid-write)
-            # must not crash the whole library — start fresh for this project instead.
-            #
-            # But "start fresh" is how a MOMENTARY read failure became permanent: the
-            # caller mutates this empty state and mutate_state saves it back, erasing
-            # every chapter's status, usage and cost for the novel — which then reads
-            # as entirely untranslated and re-bills to redo. Keep the bytes first.
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
             quarantine_unreadable(path)
             data = {}
         return cls(data if isinstance(data, dict) else {})

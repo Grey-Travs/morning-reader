@@ -30,7 +30,10 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .atomic import atomic_write_json, atomic_write_text, quarantine_unreadable
+from .atomic import (
+    atomic_write_json, atomic_write_text, quarantine_unreadable,
+    read_text_retrying,
+)
 from .locks import file_lock
 
 VALID_TYPES = {"name", "place", "skill", "term", "other"}
@@ -183,10 +186,13 @@ class Glossary:
         path = Path(path)
         if not path.exists():
             return cls([])
+        # A read failure and a parse failure are different things — see State.load.
+        # Could not READ it: retry, then raise, because a caller that degraded to an
+        # empty glossary would save that back over every locked name in the work.
+        raw = read_text_retrying(path)
         try:
-            raw = path.read_text(encoding="utf-8")
             data = json.loads(raw) if raw.strip() else []
-        except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
             # A corrupt glossary must not break translation or library loading. But
             # the next approval loads this empty list, adds one term and saves it back
             # — so a MOMENTARY read failure would wipe every locked name, and the
@@ -391,9 +397,11 @@ def load_pending(path: str | Path) -> list[dict]:
     path = Path(path)
     if not path.exists():
         return []
+    # Read failure vs parse failure — see State.load.
+    raw = read_text_retrying(path)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
+        data = json.loads(raw) if raw.strip() else []
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
         quarantine_unreadable(path)
         return []
     return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
