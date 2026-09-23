@@ -575,27 +575,63 @@ async def upload_pages(pid: str, files: list[UploadFile],
     require_project(pid)
     added, duplicates, rejected = [], [], []
 
+    # Cheap check before anything is read into memory. Re-checked under the lock
+    # below, which is the one that actually counts.
+    if len(pages_mod.load_pages(pid).get("pages", [])) + len(files) > \
+            pages_mod.MAX_PAGES_PER_PROJECT:
+        raise HTTPException(413, f"That would take this project past "
+                                 f"{pages_mod.MAX_PAGES_PER_PROJECT} pages.")
+
+    # ---- read and identify everything FIRST, holding no lock --------------------
+    #
+    # This endpoint is `async`, so its body runs ON the event-loop thread, and
+    # `mutate_pages` takes a `threading.RLock` — which is re-entrant PER THREAD. So an
+    # `await` inside that lock does not merely hold it: it hands control to every other
+    # coroutine on the same thread, and each of them re-enters the lock instantly
+    # rather than waiting. The page worker's `_apply_page_result` is exactly such a
+    # caller. It would write a finished, PAID-FOR read, and then this function would
+    # resume and save the snapshot it loaded before that happened — erasing the read,
+    # its cost, and its regions, and leaving the page looking as though it had never
+    # been read. Two overlapping uploads lose one batch outright and leave surviving
+    # records pointing at the other batch's image bytes.
+    #
+    # The rule this restores is the one `morning/locks.py` states as an assumption:
+    # a manifest mutation runs to completion without yielding. **No `await` may appear
+    # between the `with` below and its close.**
+    staged: list[tuple[str, bytes, object, str]] = []
+    for upload in files:
+        name = upload.filename or ""
+        # `size` is known from the multipart headers, so an oversized file is refused
+        # without being brought into memory at all.
+        declared = getattr(upload, "size", None)
+        if declared is not None and declared > MAX_IMAGE_BYTES:
+            rejected.append({"name": name, "reason": "That image is larger than "
+                                                     "Morning Reader accepts."})
+            continue
+        data = await upload.read()
+        if len(data) > MAX_IMAGE_BYTES:
+            rejected.append({"name": name, "reason": "That image is larger than "
+                                                     "Morning Reader accepts."})
+            continue
+        info = inspect(data)
+        if not info.ok:
+            rejected.append({"name": name, "reason": unsupported_reason(data[:64])})
+            continue
+        staged.append((name, data, info, pages_mod.sha256_of(data)))
+
+    if not staged:
+        return {"added": added, "duplicates": duplicates, "rejected": rejected}
+
+    # ---- now mutate, with no await anywhere inside ------------------------------
     with pages_mod.mutate_pages(pid) as doc:
-        if len(doc.get("pages", [])) + len(files) > pages_mod.MAX_PAGES_PER_PROJECT:
+        if len(doc.get("pages", [])) + len(staged) > pages_mod.MAX_PAGES_PER_PROJECT:
             raise HTTPException(413, f"That would take this project past "
                                      f"{pages_mod.MAX_PAGES_PER_PROJECT} pages.")
         batch = pages_mod.new_batch(doc, label)
         folder = pages_mod.pages_dir(pid)
         folder.mkdir(parents=True, exist_ok=True)
 
-        for upload in files:
-            data = await upload.read()
-            name = upload.filename or ""
-            if len(data) > MAX_IMAGE_BYTES:
-                rejected.append({"name": name, "reason": "That image is larger than "
-                                                         "Morning Reader accepts."})
-                continue
-            info = inspect(data)
-            if not info.ok:
-                rejected.append({"name": name,
-                                 "reason": unsupported_reason(data[:64])})
-                continue
-            digest = pages_mod.sha256_of(data)
+        for name, data, info, digest in staged:
             existing = pages_mod.find_by_hash(doc, digest)
             if existing is not None:
                 duplicates.append({"name": name, "seq": existing.get("seq")})
