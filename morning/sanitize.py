@@ -84,19 +84,44 @@ from .textsource import SEP_RE
 
 # ALWAYS signals — notation and phrasing that does not occur in web-novel prose, so
 # they mark a block as meta even when it also contains dialogue.
-_ALWAYS = re.compile(
-    r"""(?ix)
+#
+# Split in two, and the split is load-bearing.
+#
+# NOTATION never occurs inside real prose, so a block carrying it can be deleted
+# whatever else it contains — there is nothing to protect.
+_NOTATION = re.compile(
+    r"""
+      ===\s*new_terms
+    | \bas\ an\ ai\b
+    | translator'?s?\ note\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# PHRASES mark a block as chatter too — but every one of them can legitimately appear
+# in a novel. "Re-reading the passage, she frowned" is ordinary narration. A character
+# may consult a glossary, or argue about the romanization of a name, or observe that
+# the original Japanese was ambiguous. These are strong signals, not proof, so a block
+# matching one still goes through the mixed-block protection like everything else.
+#
+# Deleting a paragraph because the story used the word "glossary" is precisely the
+# failure this module exists to prevent: losing a leak is recoverable, deleting prose
+# is not.
+_PHRASES = re.compile(
+    r"""
       \bglossary\b
     | the\ narrator(\ here)?\ is
     | the\ (original|source)\ japanese\b
     | i'?ll\ use\ the\ (spelling|reading)
     | re-?reading\ the\ (chapter|source|glossary|names?|passage)
     | romaniz(e|ed|ing|ation)
-    | ===\s*new_terms
-    | \bas\ an\ ai\b
-    | translator'?s?\ note\b
-    """
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
+
+# Either kind marks a block as meta. Only _NOTATION licenses deleting it outright.
+_ALWAYS = re.compile(f"(?:{_NOTATION.pattern})|(?:{_PHRASES.pattern})",
+                     re.IGNORECASE | re.VERBOSE)
 
 # SELF-CORRECTION / FRAMING — the model narrating its task. Only counts when the block
 # has NO dialogue quotes, so "'Let me redo my makeup,' she said" is safe. The verbs
@@ -192,8 +217,24 @@ def strip_meta(text: str) -> tuple[str, list[str], list[str]]:
             kept.append(block)
             continue
         # Notation that never appears in prose — safe to delete whatever surrounds it.
-        if _ALWAYS.search(block) or _RULE.match(block):
+        # This is _NOTATION only, NOT every "always" signal.
+        if _NOTATION.search(block) or _RULE.match(block):
             removed.append(block.strip())
+            continue
+
+        # A phrase signal ALONE never deletes. Every one of them can occur in a real
+        # novel, and the mixed-block rule below cannot save them: it discounts any
+        # SENTENCE containing a signal, so a one-sentence paragraph that is both real
+        # prose and contains the word "glossary" leaves no remainder and would be
+        # deleted entire. "Re-reading the passage, she frowned" is exactly that shape.
+        #
+        # So a block whose only evidence is a phrase is kept and reported. The leak
+        # survives into review, which is the trade this module is built on: losing a
+        # leak is recoverable, deleting prose is not. A block that ALSO narrates the
+        # model's own task (`_SELF`) falls through to the mixed-block rule as before.
+        if _PHRASES.search(block) and not _SELF.search(block):
+            kept.append(block)
+            suspicious.append(block.strip())
             continue
         if _is_mixed_block(block):
             kept.append(block)

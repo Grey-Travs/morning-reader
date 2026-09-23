@@ -339,3 +339,107 @@ def test_stripping_nothing_leaves_the_text_alone():
     assert strip_meta("")[0] == ""
     assert strip_meta("Plain prose.")[0] == "Plain prose."
     assert strip_meta("Plain prose.")[1:] == ([], [])
+
+
+# ---- prose that merely LOOKS like chatter -------------------------------------
+# `strip_meta` deleted any block containing one of the "always" signals outright,
+# before the mixed-block protection could run. Several of those signals occur in
+# ordinary novels, so real paragraphs were being deleted from finished chapters —
+# the exact failure this module's own rule forbids: losing a leak is recoverable,
+# deleting prose is not.
+#
+# The signals still mark a block as meta. What changed is that they no longer license
+# DELETING it without first checking what else is in it.
+
+_PROSE_WITH_A_TRAP = {
+    "re-reading": (
+        "Re-reading the passage, she frowned at the unfamiliar characters and set "
+        "the book down on the low table beside the window."),
+    "glossary": (
+        "He turned to the glossary at the back of the book, hoping the old scholar "
+        "had bothered to explain what the word actually meant."),
+    "romanization": (
+        "She hated the romanization of her name more than anything — three syllables "
+        "flattened into something a stranger could pronounce."),
+    "the original japanese": (
+        "The letter had been translated badly. The original Japanese, he suspected, "
+        "had said something a good deal less polite than this."),
+    "the narrator is": (
+        "The narrator is lying to you, her professor had said, and she had not "
+        "believed him until she reached the final chapter."),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_PROSE_WITH_A_TRAP))
+def test_real_prose_is_never_deleted_for_one_suspicious_phrase(name):
+    prose = _PROSE_WITH_A_TRAP[name]
+
+    clean, removed, suspicious = strip_meta(prose)
+
+    assert prose in clean, f"a real paragraph was deleted for the phrase {name!r}"
+    assert removed == []
+
+
+@pytest.mark.parametrize("name", sorted(_PROSE_WITH_A_TRAP))
+def test_but_it_is_still_reported_for_review(name):
+    """Kept is not the same as unremarked. The block goes to a human, which is the
+    treatment the module reserves for anything it is not sure about."""
+    _clean, _removed, suspicious = strip_meta(_PROSE_WITH_A_TRAP[name])
+
+    assert suspicious, f"{name!r} should still be flagged, just not deleted"
+
+
+def test_a_surrounding_paragraph_survives_too():
+    """The whole point: the deletion took the neighbouring sentences with it."""
+    text = ("She closed the door behind her and listened to the rain.\n\n"
+            "Re-reading the passage, she frowned at the unfamiliar characters and "
+            "set the book down.\n\n"
+            "Somewhere below, a kettle began to complain.")
+
+    clean, removed, _suspicious = strip_meta(text)
+
+    assert "listened to the rain" in clean
+    assert "kettle began to complain" in clean
+    assert "frowned at the unfamiliar characters" in clean
+    assert removed == []
+
+
+def test_bare_chatter_carrying_the_same_phrase_is_still_removed():
+    """The signal still works. A block that is chatter and nothing else goes."""
+    clean, removed, _suspicious = strip_meta(
+        "Let me re-read the glossary first.")
+
+    assert clean.strip() == ""
+    assert removed
+
+
+def test_notation_is_still_deleted_whatever_surrounds_it():
+    """`===NEW_TERMS===` and friends never occur in a novel, so there is nothing to
+    protect and the block goes regardless of how much text is around it."""
+    text = ("Here is a long paragraph of perfectly real prose that runs on for a "
+            "while and would otherwise be protected by the mixed-block rule. "
+            "===NEW_TERMS=== and then some more.")
+
+    clean, removed, _suspicious = strip_meta(text)
+
+    assert clean.strip() == ""
+    assert removed
+
+
+def test_an_ai_disclaimer_is_still_deleted():
+    clean, removed, _ = strip_meta(
+        "As an AI language model I should note that this chapter contains a great "
+        "deal of dialogue which I have rendered as faithfully as I could manage.")
+
+    assert clean.strip() == ""
+    assert removed
+
+
+def test_the_two_signal_sets_are_disjoint_in_intent():
+    """A phrase that can occur in prose must never be in the delete-regardless set."""
+    from morning.sanitize import _NOTATION
+
+    for phrase in ("glossary", "romanization", "re-reading the passage",
+                   "the original Japanese", "the narrator is"):
+        assert not _NOTATION.search(phrase), (
+            f"{phrase!r} can appear in a real novel and must not license deletion")
