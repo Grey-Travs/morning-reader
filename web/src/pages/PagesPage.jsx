@@ -184,8 +184,11 @@ export default function PagesPage() {
 
   const read = async () => {
     const ids = [...selected]
+    // By `read`, not by region count — the server's sweep keys on `read`. A page that
+    // came back with no text is fully read and fully billed; counting it as unread
+    // offered it forever and the press did nothing.
     const count = ids.length || (data?.pages || []).filter(
-      (p) => !p.regions && p.status !== 'skipped').length
+      (p) => !p.read && p.status !== 'skipped').length
     if (!count) {
       setNotice('Every page has been read already. Select some to read them again.')
       return
@@ -195,7 +198,13 @@ export default function PagesPage() {
       + 'This uses your Claude plan. You can stop it at any time, and a page that has '
       + 'already been read is never read again unless you select it.')
     if (!ok) return
-    await act(() => api.readPages(pid, ids.length ? { ids, force: true } : {}))
+    const result = await act(
+      () => api.readPages(pid, ids.length ? { ids, force: true } : {}))
+    // The server may legitimately queue nothing. Saying so beats a button that
+    // appears to do nothing, which invites paying to "retry" work already done.
+    if (result && !result.job_id) {
+      setNotice('Those pages have all been read already.')
+    }
     refresh()
   }
 
@@ -214,7 +223,7 @@ export default function PagesPage() {
   // precisely so the screen can branch.
   const isManga = data.kind === 'manga'
   const needChecking = (summary.by_status || {})['needs-check'] || 0
-  const unread = pages.filter((p) => !p.regions && p.status !== 'skipped').length
+  const unread = pages.filter((p) => !p.read && p.status !== 'skipped').length
   // A novel builds from approved pages only; a manga builds from every page that is
   // not explicitly "not text", because its art is the content.
   const canBuild = summary.ready > 0 || (isManga && summary.total > 0)

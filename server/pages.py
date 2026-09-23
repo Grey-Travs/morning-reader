@@ -391,10 +391,15 @@ def effective_read(page: dict):
     says so by name.
     """
     read = page_from_dict(page.get("read") or {})
-    saved = (page.get("order") or {}).get("texts")
+    stored = page.get("order") or {}
+    saved = stored.get("texts")
     if not saved:
         return read, ""
-    applied = apply_text_order(read, [str(t) for t in saved])
+    # Ids are passed as a HINT alongside the words: they disambiguate two bubbles
+    # saying exactly the same thing, and are ignored the moment the text disagrees.
+    # An order stored before ids were kept simply has none, and matches on words alone.
+    applied = apply_text_order(read, [str(t) for t in saved],
+                               [str(i) for i in (stored.get("ids") or [])])
     if applied is None:
         return read, ("your reading order no longer applies — the words on this page "
                       "changed when it was read again")
@@ -432,8 +437,11 @@ def set_order(page: dict, ids: list[str] | None) -> bool:
         reordered = reorder_regions(read, [str(i) for i in ids])
     except ValueError:
         return False
-    page["order"] = {"texts": order_texts(reordered), "source": "user",
-                     "at": now_iso()}
+    page["order"] = {"texts": order_texts(reordered),
+                     # Both. The words are what survives a re-read; the ids are what
+                     # tell two identical bubbles apart within THIS read.
+                     "ids": [r.id for r in reordered.in_order()],
+                     "source": "user", "at": now_iso()}
     page["order_check"] = order_check(page)
     return True
 

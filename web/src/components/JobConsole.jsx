@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { STATUS_LABEL } from '../format'
+import { itemLabel, statusLabel } from '../format'
 
 // The live console: what the worker is doing right now, and what it has done.
 //
@@ -24,7 +24,7 @@ function Line({ event }) {
         {' '}{event.index}. <span className="font-source">{event.title}</span>
         {' — '}
         <span style={{ color: tone }}>
-          {STATUS_LABEL[event.status] ?? event.status}{note}
+          {statusLabel(event.kind, event.status)}{note}
         </span>
         {event.error && <span style={{ color: 'var(--bad)' }}> · {event.error}</span>}
       </div>
@@ -90,7 +90,7 @@ export default function JobConsole({ events, queue, live, running, onResume }) {
               </span>
             ) : live ? (
               <span>
-                Chapter {live.index}
+                {live.label ?? itemLabel(live.kind, live.index)}
                 {live.title && <span className="font-source"> · {live.title}</span>}
               </span>
             ) : (

@@ -41,7 +41,10 @@ function page(seq, over = {}) {
     id: `p${seq}`, seq, name: `page-${seq}.jpg`, status: 'ok',
     width: 1200, height: 1800, bytes: 1000, batch: 'b1', error: null, hint: '',
     join_prev: '', join_glue: 'none', join_prev_source: '', join_reason: '',
-    regions: 3, confidence: 'high', chars: 400, ...over,
+    // `read` is what the server's sweep keys on, and what the row now carries. A page
+    // can be fully read and bill nothing to show for it — a splash or an action beat —
+    // so region count is not the same question.
+    read: true, regions: 3, confidence: 'high', chars: 400, ...over,
   }
 }
 
@@ -94,8 +97,8 @@ afterEach(() => {
 describe('spending money', () => {
   it('asks before reading, and says how many pages that is', async () => {
     api.pages.mockResolvedValue(manifest([
-      page(1, { status: 'new', regions: 0, chars: 0 }),
-      page(2, { status: 'new', regions: 0, chars: 0 }),
+      page(1, { status: 'new', read: false, regions: 0, chars: 0 }),
+      page(2, { status: 'new', read: false, regions: 0, chars: 0 }),
     ]))
     api.readPages.mockResolvedValue({ queued: [1, 2], job_id: 'j1' })
     show()
@@ -108,7 +111,7 @@ describe('spending money', () => {
   })
 
   it('does not reach the server when the confirm is declined', async () => {
-    api.pages.mockResolvedValue(manifest([page(1, { status: 'new', regions: 0 })]))
+    api.pages.mockResolvedValue(manifest([page(1, { status: 'new', read: false, regions: 0 })]))
     window.confirm.mockReturnValue(false)
     show()
 

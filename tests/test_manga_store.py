@@ -399,3 +399,56 @@ class TestRegionsThatAreNotTranslated:
 
         record = page(1, regions=[region("r0", "   ", 0, kind=KIND_CAPTION)])
         assert pages_mod.line_counts(record)["other"] == 0
+
+
+# ---- two bubbles that say the same thing ---------------------------------------
+# 「え？」/「え？」 and 「……」/「……」 are everywhere in manga, and the model routinely
+# gives them different English. The saved order was stored as TEXTS alone, and
+# `apply_text_order` consumed each text against the first region still holding it — so
+# two identical texts always resolved back to the original pair, and a human swapping
+# them was a silent no-op while the route returned 200 and stamped the page "user".
+
+class TestIdenticalBubbles:
+    @staticmethod
+    def _page() -> dict:
+        return page(1, regions=[region("r0", "え？", 0), region("r1", "え？", 1),
+                                region("r2", LATER, 2)])
+
+    def test_swapping_two_identical_bubbles_actually_takes(self):
+        record = self._page()
+
+        assert pages_mod.set_order(record, ["r1", "r0", "r2"])
+
+        read, note = pages_mod.effective_read(record)
+        assert [r.id for r in read.in_order()] == ["r1", "r0", "r2"]
+        assert note == ""
+
+    def test_the_ids_are_stored_beside_the_words(self):
+        record = self._page()
+        pages_mod.set_order(record, ["r1", "r0", "r2"])
+
+        assert record["order"]["ids"] == ["r1", "r0", "r2"]
+        assert record["order"]["texts"] == ["え？", "え？", LATER]
+
+    def test_an_id_is_only_a_hint_and_never_beats_the_words(self):
+        """The property that makes a saved order survive a re-read at all: ids are
+        positional, so after a re-read they may name different bubbles entirely."""
+        record = self._page()
+        pages_mod.set_order(record, ["r2", "r0", "r1"])
+
+        # Re-read: the same three things, detected in another order, ids reassigned.
+        record["read"]["regions"] = [region("r0", LATER, 0), region("r1", "え？", 1),
+                                     region("r2", "え？", 2)]
+
+        read, note = pages_mod.effective_read(record)
+        assert [r.text for r in read.in_order()] == [LATER, "え？", "え？"]
+        assert note == ""
+
+    def test_an_order_saved_before_ids_were_kept_still_applies(self):
+        """Backwards compatibility: a manifest written earlier has texts and no ids."""
+        record = self._page()
+        record["order"] = {"texts": [LATER, "え？", "え？"], "source": "user"}
+
+        read, note = pages_mod.effective_read(record)
+        assert [r.text for r in read.in_order()] == [LATER, "え？", "え？"]
+        assert note == ""

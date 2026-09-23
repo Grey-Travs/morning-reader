@@ -172,8 +172,8 @@ developing; a reload would kill an in-flight job, so it is off by default).
 ## Tests
 
 ```bash
-.venv\Scripts\python.exe -m pytest tests/ -q     # 1074 tests
-cd web && npm test                                # 91 tests
+.venv\Scripts\python.exe -m pytest tests/ -q     # 1197 tests
+cd web && npm test                                # 99 tests
 ```
 
 **No test makes a real model call.** The SDK's `query` is replaced by a fake async

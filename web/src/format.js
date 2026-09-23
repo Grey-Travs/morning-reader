@@ -84,6 +84,26 @@ export const CLASS_LABEL = {
   empty: 'Blank',
 }
 
+// What a queued item is CALLED, by the axis it belongs to. One worker serves prose
+// chapters, page reads and manga chapters, and their statuses are three different key
+// spaces — `ok` and `needs-check` mean nothing to STATUS_LABEL, so a finished page read
+// fell through to the raw string.
+export function statusLabel(kind, status) {
+  if (kind === 'read-page') return PAGE_STATUS_LABEL[status] ?? status
+  if (kind === 'translate-script') return MANGA_CHAPTER_STATUS_LABEL[status] ?? status
+  return STATUS_LABEL[status] ?? status
+}
+
+// And what it is called in the console header. The server already sends a `label`
+// ("Reading page 7", "Translating chapter 2") for exactly this; calling everything a
+// "Chapter" made a page read indistinguishable from a chapter translation on the one
+// surface whose job is to show what is currently spending the plan.
+export function itemLabel(kind, index) {
+  if (kind === 'read-page') return `Page ${index}`
+  if (kind === 'translate-script') return `Chapter ${index}`
+  return `Chapter ${index}`
+}
+
 export function countLabel(n, singular, plural = `${singular}s`) {
   return `${n.toLocaleString()} ${n === 1 ? singular : plural}`
 }

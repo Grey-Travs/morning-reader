@@ -74,11 +74,15 @@ export function useJobStream(pid) {
         }
 
         if (event.type === 'live') {
-          setLive({ index: event.index, title: event.title, done: event.done, total: event.total })
+          setLive({ index: event.index, title: event.title, kind: event.kind,
+                    label: event.label, done: event.done, total: event.total })
         } else if (event.type === 'progress') {
           setLive((previous) => ({ ...(previous || {}), index: event.index, done: event.done, total: event.total }))
         } else if (event.type === 'start') {
-          setLive({ index: event.index, title: event.title, done: 0, total: event.units || 0 })
+          // `kind` and `label` travel with it. The server sends them precisely so the
+          // console can say "Reading page 7" rather than calling everything a chapter.
+          setLive({ index: event.index, title: event.title, kind: event.kind,
+                    label: event.label, done: 0, total: event.units || 0 })
         } else {
           if (event.type === 'item') setLive(null)
           replayed.push(event)

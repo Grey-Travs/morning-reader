@@ -596,6 +596,12 @@ def list_pages(pid: str) -> dict:
             "join_prev_source": page.get("join_prev_source", ""),
             "join_reason": page.get("join_reason", ""),
             "regions": len(read.get("regions") or []),
+            # A BOOLEAN, not the payload — this route is polled every time a job item
+            # finishes. The pages screen counted unread pages by region count while the
+            # server's sweep keys on `read`, so a page that came back with no text (a
+            # splash, an action beat — ordinary in a manga) was offered forever and the
+            # button silently did nothing.
+            "read": bool(page.get("read")),
             "confidence": (page.get("ocr") or {}).get("confidence", ""),
             "chars": pages_mod.page_chars(page),
             # The manga side. Line TEXT is deliberately never included: this route is

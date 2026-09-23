@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
-import { countLabel } from '../format'
+import { itemLabel, countLabel } from '../format'
 
 // Every work with something in flight, across the whole app.
 //
@@ -80,7 +80,7 @@ export default function ActivityPage() {
                     )}
                   </span>
                 ) : job.current != null ? (
-                  <span>Chapter {job.current}</span>
+                  <span>{itemLabel(job.kind, job.current)}</span>
                 ) : (
                   <span>Queued</span>
                 )}

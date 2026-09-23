@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CLASS_LABEL, STATUS_LABEL, countLabel, percent, whenish } from './format'
+import { itemLabel, statusLabel, CLASS_LABEL, STATUS_LABEL, countLabel, percent, whenish } from './format'
 
 // These labels are the interface's half of a contract the server persists. If the two
 // drift, a chapter shows a status nobody can explain — so the mapping is pinned.
@@ -75,5 +75,55 @@ describe('whenish', () => {
     expect(whenish(new Date().toISOString())).toBe('just now')
     expect(whenish(new Date(Date.now() - 5 * 60 * 1000).toISOString())).toBe('5m ago')
     expect(whenish(new Date(Date.now() - 3 * 3600 * 1000).toISOString())).toBe('3h ago')
+  })
+})
+
+
+// ---- one worker, three axes ---------------------------------------------------
+// The live console and Activity called every queued item a "Chapter", including page
+// reads — so on the one surface whose job is to show what is currently spending the
+// plan, a page read was indistinguishable from a chapter translation. Once a work is
+// built, chapter 7 genuinely exists and is a different thing billed a different way.
+
+describe('what a queued item is called', () => {
+  it('names a page read as a page', () => {
+    expect(itemLabel('read-page', 7)).toBe('Page 7')
+  })
+
+  it('names a chapter as a chapter, on either axis', () => {
+    expect(itemLabel('translate', 7)).toBe('Chapter 7')
+    expect(itemLabel('translate-script', 7)).toBe('Chapter 7')
+  })
+
+  it('falls back to a chapter for an unknown kind rather than showing nothing', () => {
+    expect(itemLabel(undefined, 7)).toBe('Chapter 7')
+  })
+})
+
+describe('what a finished item says', () => {
+  it('reads a page status from the page map', () => {
+    // STATUS_LABEL is the prose map and has no `ok` or `needs-check`, so a finished
+    // page read used to fall through to the raw string.
+    expect(statusLabel('read-page', 'ok')).toBe('Read')
+    expect(statusLabel('read-page', 'needs-check')).toBe('Check this')
+  })
+
+  it('reads a manga chapter status from the manga map', () => {
+    expect(statusLabel('translate-script', 'ok')).toBe('Translated')
+  })
+
+  it('reads a prose status from the prose map', () => {
+    expect(statusLabel('translate', 'validated')).toBe('Checked')
+  })
+
+  it('shows the raw status rather than nothing when it is unrecognised', () => {
+    expect(statusLabel('translate', 'invented')).toBe('invented')
+  })
+
+  it('never mixes the maps up', () => {
+    // `ok` means nothing on the prose axis, and `validated` means nothing on the page
+    // axis. Each must come back as itself rather than as the other map's label.
+    expect(statusLabel('translate', 'ok')).toBe('ok')
+    expect(statusLabel('read-page', 'validated')).toBe('validated')
   })
 })

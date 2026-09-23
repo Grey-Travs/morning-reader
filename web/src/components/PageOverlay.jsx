@@ -122,10 +122,15 @@ export default function PageOverlay({ pid, page, selected, onSelect, showOverlay
   const narrow = useNarrow()
   const measured = page.width > 0 && page.height > 0
 
-  const drawable = (page.regions || []).filter(
-    (r) => r.translatable && isDrawable(r.box))
-  const undrawable = (page.regions || []).filter(
-    (r) => r.translatable && !isDrawable(r.box)).length
+  // Numbered from the SAME list the line strip uses, not from the drawable subset.
+  // On a phone the overlay is numbered markers and the strip is the reading surface,
+  // so those numbers are the only link between the two — and the moment one region
+  // came back with a box that could not be placed, every marker after it was one lower
+  // than its line. Marker 3 on the art was line 4 in the strip, and the wrong number
+  // went into the aria-label too.
+  const translatable = (page.regions || []).filter((r) => r.translatable)
+  const drawable = translatable.filter((r) => isDrawable(r.box))
+  const undrawable = translatable.length - drawable.length
 
   return (
     <div>
@@ -163,11 +168,11 @@ export default function PageOverlay({ pid, page, selected, onSelect, showOverlay
           }}
         />
 
-        {showOverlay && measured && drawable.map((region, i) => (
+        {showOverlay && measured && drawable.map((region) => (
           <Line
             key={region.id}
             region={region}
-            index={i}
+            index={translatable.indexOf(region)}
             markers={narrow}
             selected={selected === region.id}
             onSelect={onSelect}

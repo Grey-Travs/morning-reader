@@ -388,7 +388,8 @@ def is_drawable(box) -> bool:
     return right - left > 0 and bottom - top > 0
 
 
-def apply_text_order(page: PageRead, texts: list[str]) -> PageRead | None:
+def apply_text_order(page: PageRead, texts: list[str],
+                     ids: list[str] | None = None) -> PageRead | None:
     """Re-apply a human's saved reading order to a page that has been read again.
 
     The problem this solves: **region ids are not an identity.** ``ocr._region_from``
@@ -407,18 +408,41 @@ def apply_text_order(page: PageRead, texts: list[str]) -> PageRead | None:
     The caller then falls back to the model's order and says so.
     """
     remaining = list(page.regions)
-    ids: list[str] = []
-    for text in texts:
+    by_id = {r.id: r for r in page.regions}
+    saved_ids = [str(i) for i in (ids or [])]
+    resolved: list[str] = []
+
+    for position, text in enumerate(texts):
         wanted = (text or "").strip()
-        match = next((r for r in remaining if (r.text or "").strip() == wanted), None)
+        match = None
+
+        # Prefer the id this order was actually set against, when that region is still
+        # here and still says the same thing. Without it, two bubbles with IDENTICAL
+        # Japanese — 「え？」/「え？」, 「……」/「……」, which are everywhere in manga —
+        # both resolve to the first one every time, so a human swapping them was a
+        # silent no-op while the route returned 200 and stamped the page "user".
+        #
+        # The id is a HINT, never authority: it is only honoured when the text agrees,
+        # so a re-read that renumbered everything still falls through to matching on
+        # the words, which is the property that makes a saved order survive at all.
+        if position < len(saved_ids):
+            candidate = by_id.get(saved_ids[position])
+            if (candidate is not None and candidate in remaining
+                    and (candidate.text or "").strip() == wanted):
+                match = candidate
+
+        if match is None:
+            match = next((r for r in remaining
+                          if (r.text or "").strip() == wanted), None)
         if match is None:
             return None
         remaining.remove(match)
-        ids.append(match.id)
+        resolved.append(match.id)
+
     if remaining:
         return None
     try:
-        return reorder(page, ids)
+        return reorder(page, resolved)
     except ValueError:
         return None
 

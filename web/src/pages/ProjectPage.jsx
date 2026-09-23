@@ -52,10 +52,16 @@ export default function ProjectPage() {
   // spends a lot of it. Confirm first — and say HOW MUCH work is about to start,
   // because "are you sure?" with no number is a dialog people learn to click through.
   const translate = async (body) => {
+    // Count what the SERVER counts. `resolve_items` skips a chapter only when
+    // `is_done(index, hash, kind)` holds, and that needs the hash to match too — so a
+    // chapter whose Japanese changed is NOT done. The client's own copy of the rule
+    // left it out, which meant the dialog said "there is nothing left to translate"
+    // about a chapter the same screen was showing a "changed" pill on, and no request
+    // was ever sent.
     const count = body.indices
       ? body.indices.length
       : chapters.filter((c) => c.class === 'source'
-          && !['validated', 'translated'].includes(c.status)).length
+          && (c.stale || c.status !== 'validated')).length
     if (count === 0) {
       setError({ explained: {
         code: 'nothing-to-do',
@@ -118,6 +124,13 @@ export default function ProjectPage() {
   // The UI has to fork with it, or it offers buttons that 400.
   const isManga = project.kind === 'manga'
   const queued = new Set([...(queue.pending || []), queue.current].filter((v) => v != null))
+  // One worker serves all three axes, so those integers may be prose chapter indices,
+  // page seqs or manga chapter numbers. Where the number spaces overlap — re-reading
+  // page 3 of a built work — the matching CHAPTER rows were being overwritten with
+  // "Queued", replacing a real `failed` or `needs-check` for as long as the sweep ran.
+  const onThisAxis = isManga
+    ? queue.kind === 'translate-script'
+    : queue.kind === 'prepare' || queue.kind === 'translate'
   const anySelected = selected.size > 0
   // For a manga `stale` is a COUNT of out-of-date lines, not a boolean.
   const staleCount = chapters.filter((c) => c.stale).length
@@ -275,7 +288,7 @@ export default function ProjectPage() {
                     color: (isManga ? MANGA_CHAPTER_STATUS_TONE : STATUS_TONE)[
                       chapter.status] || 'var(--hint)',
                   }}>
-                    {queued.has(chapter.index) && running
+                    {queued.has(chapter.index) && running && onThisAxis
                       ? (queue.current === chapter.index ? 'Working…' : 'Queued')
                       : (isManga ? MANGA_CHAPTER_STATUS_LABEL : STATUS_LABEL)[
                           chapter.status] ?? chapter.status}
