@@ -24,9 +24,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
+from morning import docs_source, google_auth
 from morning.chapter_files import (
     has_previous, output_total, read_audit_translation, read_chapter,
 )
@@ -310,6 +312,119 @@ def replace_source(pid: str, req: ReplaceSource) -> dict:
     if not chapters:
         raise HTTPException(400, "There was no text to read in that — it came through "
                                  "empty.")
+    pj.save_source(pid, chapters)
+    pj.set_chapter_count(pid, len(chapters))
+    return {"chapters": len(chapters)}
+
+
+# ---- Google Docs ingestion ---------------------------------------------------
+# One of the four source paths. Reading only: the token's scopes are read-only, so
+# writing to a document would be refused at Google's end even if this code tried, and
+# tests/test_scope_guards.py refuses the method names outright.
+
+@app.get("/api/google/status")
+def google_status() -> dict:
+    cfg = load_global_config()
+    return {
+        "connected": google_auth.is_connected(cfg.google.token_file),
+        # Distinguished because the fixes are different: no client file means "set one
+        # up in the Cloud console", no token means "click connect".
+        "credentials_present": Path(cfg.google.credentials_file).exists(),
+        "scopes": list(google_auth.SCOPES),
+    }
+
+
+@app.post("/api/google/connect")
+async def google_connect() -> dict:
+    """Run the consent flow. Opens a browser and blocks until it is answered.
+
+    Only ever reached from an explicit click — never from a page load or a
+    translation, which would pop a browser window at someone mid-run.
+    """
+    cfg = load_global_config()
+    try:
+        await run_in_threadpool(google_auth.sign_in, cfg.google.credentials_file,
+                                cfg.google.token_file)
+    except google_auth.GoogleAuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"connected": True}
+
+
+@app.post("/api/google/disconnect")
+def google_disconnect() -> dict:
+    cfg = load_global_config()
+    return {"disconnected": google_auth.forget(cfg.google.token_file)}
+
+
+def _google_credentials(cfg: Config):
+    creds = google_auth.saved_credentials(cfg.google.token_file)
+    if creds is None:
+        raise HTTPException(401, "Morning Reader is not connected to Google yet. "
+                                 "Connect it, then try again.")
+    return creds
+
+
+def _fetch_doc_chapters(cfg: Config, doc_id: str) -> list:
+    try:
+        return docs_source.load_chapters(
+            _google_credentials(cfg), doc_id,
+            flatten_children=cfg.google.flatten_child_tabs)
+    except docs_source.DocumentError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+class CreateDocsProject(BaseModel):
+    # A pasted address bar is fine; the id is pulled out of it.
+    document: str
+    title: str = ""
+    kind: str = pj.KIND_NOVEL
+
+
+@app.post("/api/projects/docs")
+async def create_docs_project(req: CreateDocsProject) -> dict:
+    """Create a project from a Google Doc — one chapter per tab."""
+    cfg = load_global_config()
+    doc_id = docs_source.extract_doc_id(req.document)
+    if not doc_id:
+        raise HTTPException(400, "That does not look like a Google Doc link or id. "
+                                 "Paste the document's address, or its id.")
+    if req.kind not in pj.KINDS:
+        raise HTTPException(400, f"Unknown kind {req.kind!r}.")
+
+    chapters = await run_in_threadpool(_fetch_doc_chapters, cfg, doc_id)
+    if not chapters:
+        raise HTTPException(400, "That document has no chapters to read.")
+
+    project = pj.create_project(req.title or f"Document {doc_id[:8]}",
+                                kind=req.kind, ingest=pj.INGEST_DOCS)
+    # Source first, then the count — see _create_from_text for why the ordering
+    # matters. The document id is recorded so the source can be re-fetched later.
+    pj.save_source(project["id"], chapters)
+    pj.set_source_document(project["id"], doc_id)
+    project = pj.set_chapter_count(project["id"], len(chapters)) or project
+    return {"project": project, "chapters": len(chapters)}
+
+
+@app.post("/api/projects/{pid}/source/refresh")
+async def refresh_source(pid: str) -> dict:
+    """Re-read the document this project came from.
+
+    The point of this existing at all: a Doc gets edited. Without a refresh, fixing
+    the Japanese and re-translating produces the SAME English, because the worker
+    reads the stored snapshot and the content hash never moves.
+    """
+    project, cfg = project_cfg(pid)
+    doc_id = project.get("source_document")
+    if not doc_id:
+        raise HTTPException(400, "This project did not come from a Google Doc, so "
+                                 "there is nothing to refresh.")
+    if jobs.active_job(pid) is not None:
+        raise HTTPException(409, "Something is still running on this project. Stop it "
+                                 "first, then refresh.")
+
+    chapters = await run_in_threadpool(_fetch_doc_chapters, cfg, doc_id)
+    if not chapters:
+        raise HTTPException(400, "That document has no chapters to read.")
     pj.save_source(pid, chapters)
     pj.set_chapter_count(pid, len(chapters))
     return {"chapters": len(chapters)}

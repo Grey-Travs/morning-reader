@@ -7,6 +7,19 @@ effort = "high"        # low | medium | high | xhigh | max
 thinking = true
 api_retry_count = 4
 
+[google]
+# Reading a Google Doc, one chapter per tab. Optional — paste and .txt need none of it.
+# Create an OAuth client (Desktop app) in the Google Cloud console under
+# APIs & Services > Credentials, download it, and save it as client_secret.json.
+# Both files below are gitignored.
+#
+# The SCOPES are not configurable and are read-only (documents.readonly). This app
+# never writes to a document, and asking for less means a leaked token can only read.
+credentials_file = "client_secret.json"
+token_file = "token.json"
+# A tab split into sub-tabs is still one chapter as far as the reader is concerned.
+flatten_child_tabs = true
+
 [translation]
 chunk_threshold = 12000
 continuity_paragraphs = 3
@@ -19,6 +32,11 @@ honorific_note = "Keep -san, -kun, -chan, -sama, -sensei and -senpai attached to
 # for exactly what counts — notably, Japanese quote marks 「」 do NOT.
 skip_non_source = true
 min_source_fraction = 0.15
+
+# How many EXTRA attempts a chapter gets when it fails its checks. The retry is told
+# why the first attempt failed; past one, the money is better spent on a human looking
+# at it. Set to 0 to disable retrying.
+validation_retries = 1
 
 [validation]
 # NOT YET CALIBRATED for Japanese -> English. These values are carried over from the

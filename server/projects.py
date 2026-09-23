@@ -209,6 +209,20 @@ def load_source(pid: str) -> list[Chapter]:
     return records_to_chapters(records) if isinstance(records, list) else []
 
 
+def set_source_document(pid: str, doc_id: str) -> dict | None:
+    """Record which document this project was read from, so it can be re-read.
+
+    Without it, editing the Doc and re-translating produces the same English: the
+    worker reads the stored snapshot, and the content hash never moves.
+    """
+    project = get_project(pid)
+    if project is None:
+        return None
+    project["source_document"] = doc_id
+    project["updated_at"] = _now()
+    return _write_project(project)
+
+
 def set_chapter_count(pid: str, count: int) -> dict | None:
     project = get_project(pid)
     if project is None:

@@ -62,6 +62,31 @@ _NETWORK_MODULES = {
 # through it, which is the opposite of an outbound call. Allowed only under tests/.
 _TEST_ONLY_NETWORK = {"httpx"}
 
+# Reading a Google Doc is INGESTION, not publishing — the plan lists it as one of four
+# source paths. But its client is an HTTP client, and an import cannot tell "read a
+# document you own" from "post to a site".
+#
+# So the ban is not lifted, it is MOVED: the client may be imported in exactly these
+# two modules, and `test_the_google_client_is_only_ever_used_to_read` then checks what
+# those modules actually CALL. That is a stricter test than the blanket import ban it
+# replaces, because it inspects the operation rather than the dependency.
+_GOOGLE_MODULES = {"morning/google_auth.py", "morning/docs_source.py"}
+_GOOGLE_CLIENTS = {"googleapiclient", "google", "google_auth_oauthlib", "httplib2",
+                   "google_auth_httplib2"}
+
+# Methods that change something on Google's side. None of them may appear in the two
+# modules above. `documents().get()` is the only call this app makes, and the token's
+# scope is read-only, so any of these would fail at Google anyway — refusing the NAME
+# means it never gets written in the first place.
+_MUTATING_METHODS = {
+    "batchUpdate", "batchCreate", "batchDelete", "create", "insert", "update",
+    "patch", "delete", "trash", "copy", "move", "publish",
+}
+
+# Drive is a different surface with a different blast radius, and this app has no
+# business on it at all: it reads one document by id.
+_FORBIDDEN_SERVICES = {"files", "drive", "permissions", "revisions"}
+
 
 def _imported_modules(path: Path) -> set[str]:
     try:
@@ -88,8 +113,11 @@ def test_no_module_imports_an_outbound_http_client():
     offences: list[str] = []
     for path in _python_files():
         is_test = "tests" in path.parts
+        is_google_module = _relative(path) in _GOOGLE_MODULES
         for imported in _imported_modules(path):
             root = imported.split(".")[0]
+            if is_google_module and root in _GOOGLE_CLIENTS:
+                continue  # allowed here, and checked by the operation test below
             if imported in _NETWORK_MODULES or root in _NETWORK_MODULES:
                 if is_test and root in _TEST_ONLY_NETWORK:
                     continue
@@ -98,6 +126,97 @@ def test_no_module_imports_an_outbound_http_client():
     assert not offences, (
         "Morning Reader does not publish. An outbound HTTP client appeared:\n  "
         + "\n  ".join(offences))
+
+
+def test_the_google_client_is_confined_to_the_two_reading_modules():
+    """The exemption above is narrow by construction, so it has to stay narrow.
+
+    If a third module ever imports the client, this fails — which is the point: the
+    operation check below only inspects those two files, so a client imported anywhere
+    else would be unguarded.
+    """
+    offences = []
+    for path in _python_files():
+        if _relative(path) in _GOOGLE_MODULES or "tests" in path.parts:
+            continue
+        for imported in _imported_modules(path):
+            if imported.split(".")[0] in _GOOGLE_CLIENTS:
+                offences.append(f"{_relative(path)} imports {imported}")
+
+    assert not offences, (
+        "A Google client may only be imported by "
+        + ", ".join(sorted(_GOOGLE_MODULES)) + ". Found:\n  " + "\n  ".join(offences))
+
+
+def test_the_google_client_is_only_ever_used_to_read():
+    """The operation-level guard that replaces a blanket import ban.
+
+    Reading a document is ingestion; writing one would be publishing. An import cannot
+    tell those apart, so this checks the METHOD NAMES the two allowed modules call.
+    ``documents().get()`` is the only Google call this app makes.
+
+    Stricter than the ban it replaces: a blanket import ban would have been satisfied
+    by not importing the client, while saying nothing about what code that DID import
+    it went on to do.
+    """
+    offences: list[str] = []
+    for name in sorted(_GOOGLE_MODULES):
+        path = ROOT / name
+        assert path.exists(), f"{name} is listed as a Google module but does not exist"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute):
+                continue
+            if node.attr in _MUTATING_METHODS:
+                offences.append(f"{name}:{node.lineno}: calls .{node.attr}()")
+            if node.attr in _FORBIDDEN_SERVICES:
+                offences.append(f"{name}:{node.lineno}: reaches .{node.attr}()")
+
+    assert not offences, (
+        "Morning Reader reads documents and never writes them. Found:\n  "
+        + "\n  ".join(offences))
+
+
+def _mutating_calls(source: str) -> list[str]:
+    """The banned method names a piece of source calls. Shared by the guard above and
+    by the test below that proves the guard can actually fail."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute):
+            if node.attr in _MUTATING_METHODS or node.attr in _FORBIDDEN_SERVICES:
+                found.append(node.attr)
+    return found
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("service.documents().get(documentId=x).execute()", []),
+    ("service.documents().batchUpdate(body=x).execute()", ["batchUpdate"]),
+    ("drive.files().create(body=x).execute()", ["files", "create"]),
+    ("drive.files().delete(fileId=x).execute()", ["files", "delete"]),
+    ("service.presentations().batchUpdate(body=x)", ["batchUpdate"]),
+])
+def test_the_operation_guard_can_actually_fail(source, expected):
+    """A guard that has never seen a violation might be passing vacuously.
+
+    This runs the same check against source that SHOULD trip it, so the passing
+    result above means "nothing mutating is called", not "the check does nothing".
+    """
+    assert sorted(_mutating_calls(source)) == sorted(expected)
+
+
+def test_the_google_scopes_are_read_only():
+    """The strongest form of the promise: enforced by Google, not by our discipline.
+
+    A token granted only ``documents.readonly`` cannot write to a document even if
+    this code tried — the refusal happens at their end. Asking for less is the one
+    place "nothing publishes" can be made true by something other than a test.
+    """
+    from morning.google_auth import SCOPES
+
+    assert SCOPES, "there must be an explicit scope list, not an empty default"
+    for scope in SCOPES:
+        assert scope.endswith(".readonly"), f"{scope} is not a read-only scope"
+        assert "drive" not in scope, f"{scope} reaches Drive; this app reads one doc"
 
 
 def test_no_publishing_vocabulary_survives_in_module_names():

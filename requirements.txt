@@ -10,6 +10,13 @@ uvicorn[standard]>=0.29
 # raises at REQUEST time rather than import time when it is missing, so an undeclared
 # copy inherited from another environment hides the gap until someone uploads a file.
 python-multipart>=0.0.9
+# Reading a Google Doc — one of the four ingestion paths. READ-ONLY: the scopes
+# requested in morning/google_auth.py are documents.readonly and nothing else, so a
+# token that leaked could only read. The client is confined to two modules and
+# tests/test_scope_guards.py refuses any mutating Docs or Drive method name in them.
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2
 # Already present transitively via uvicorn/click; declared explicitly because the live
 # job console uses it to enable ANSI colour in the Windows terminal.
 colorama>=0.4.6
@@ -18,6 +25,7 @@ colorama>=0.4.6
 pytest>=8.0
 httpx>=0.27          # fastapi.testclient needs it
 
-# NOT here, deliberately: no HTTP client for outbound calls, no browser automation,
-# no site adapters. Morning Reader translates and reads; it never publishes. The
-# absence is enforced by tests/test_scope_guards.py, not just by this comment.
+# NOT here, deliberately: no general HTTP client, no browser automation, no site
+# adapters. Morning Reader translates and reads; it never publishes. The Google client
+# above is the one exception and it is an INGESTION dependency — enforced by
+# tests/test_scope_guards.py at the operation level, not just by this comment.

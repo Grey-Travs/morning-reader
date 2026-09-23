@@ -28,6 +28,25 @@ class AnthropicConfig(BaseModel):
     api_retry_count: int = 4
 
 
+class GoogleConfig(BaseModel):
+    """Where the shared Google login lives.
+
+    Global rather than per-project: one person signs in once, and every project that
+    reads a document uses that. Both files are gitignored — one is an OAuth client,
+    the other holds a refresh token.
+
+    The scopes are NOT configurable. They are read-only and fixed in
+    morning/google_auth.py, because a widenable scope list is a scope list that
+    eventually widens.
+    """
+
+    credentials_file: Path = Path("client_secret.json")
+    token_file: Path = Path("token.json")
+    # A tab split into sub-tabs is still one chapter as far as the reader is
+    # concerned, so nested tabs are flattened into their parent by default.
+    flatten_child_tabs: bool = True
+
+
 class PathsConfig(BaseModel):
     """Per-project file locations. Overlaid by ``server.projects.project_config``;
     the defaults here are only meaningful when the engine is driven directly."""
@@ -94,6 +113,7 @@ class ValidationConfig(BaseModel):
 
 class Config(BaseModel):
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
+    google: GoogleConfig = Field(default_factory=GoogleConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     translation: TranslationConfig = Field(default_factory=TranslationConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
