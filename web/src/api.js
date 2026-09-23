@@ -65,6 +65,15 @@ export const api = {
     return req(`/api/projects/upload?${query}`, { method: 'POST', body: form })
   },
 
+  // Google Docs — one of the four ingestion paths, and read-only. `status`
+  // distinguishes "no OAuth client set up" from "not signed in", because the two need
+  // different things from the user.
+  googleStatus: () => req('/api/google/status'),
+  googleConnect: () => req('/api/google/connect', json({})),
+  googleDisconnect: () => req('/api/google/disconnect', json({})),
+  createFromDoc: (body) => req('/api/projects/docs', json(body)),
+  refreshSource: (pid) => req(`/api/projects/${pid}/source/refresh`, json({})),
+
   patchProject: (pid, body) => req(`/api/projects/${pid}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

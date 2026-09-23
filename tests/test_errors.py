@@ -100,6 +100,75 @@ def test_a_rate_limit_is_recognised_from_its_message_too():
     assert _explain(RuntimeError("You have hit your usage limit")).code == "rate-limited"
 
 
+# ---- Google is not Claude ----------------------------------------------------
+# The incident this discrimination exists for: a Google Docs 429 was reported as the
+# Claude plan's usage limit, sending the user to wait out a window that was never the
+# problem. Now that this app reads Docs, the same collision is live here.
+
+class _FakeResponse:
+    def __init__(self, status):
+        self.status = status
+
+
+class _GoogleHttpError(Exception):
+    """Shaped like a googleapiclient HttpError, without importing one — the client is
+    confined to two modules and this is not one of them."""
+
+    __module__ = "googleapiclient.errors"
+
+    def __init__(self, status, message=""):
+        self.resp = _FakeResponse(status)
+        super().__init__(message)
+
+
+def test_a_google_rate_limit_is_not_reported_as_the_claude_plans_limit():
+    """The whole reason _is_google exists. These are different limits with different
+    fixes, and confusing them sends the user to wait for the wrong thing."""
+    e = _explain(_GoogleHttpError(429, "Quota exceeded for quota metric"))
+
+    assert e.code == "google-rate-limited"
+    assert "not your Claude plan" in e.what
+    assert e.retryable is True
+
+
+def test_a_claude_rate_limit_is_still_recognised():
+    """The narrowing must not break the rule it narrows."""
+    assert _explain(RateLimited()).code == "rate-limited"
+    assert _explain(RuntimeError("usage limit reached")).code == "rate-limited"
+
+
+def test_a_lapsed_google_sign_in_offers_the_button_that_fixes_it():
+    e = _explain(_GoogleHttpError(401, "Invalid Credentials"))
+
+    assert e.code == "google-auth-expired"
+    assert e.action == errors.ACTION_CONNECT_GOOGLE
+    assert "Testing" in e.what, "the usual cause is worth naming"
+
+
+def test_a_missing_document_says_both_things_it_could_mean():
+    """"Not found" from Google means either the link is wrong or the signed-in account
+    cannot see it, and the user cannot tell which without being told."""
+    e = _explain(_GoogleHttpError(404, "Requested entity was not found"))
+
+    assert e.code == "google-not-found"
+    assert len(e.fixes) >= 2
+
+
+def test_an_unrecognised_google_failure_still_reads_as_google():
+    e = _explain(_GoogleHttpError(500, "Backend Error"))
+
+    assert e.code == "google-error"
+    assert e.retryable is True
+
+
+def test_a_google_401_maps_to_the_connect_action_over_http_too():
+    e = errors.from_http_detail("Morning Reader is not connected to Google yet.", 401)
+
+    assert e.code == "not-connected"
+    assert e.action == errors.ACTION_CONNECT_GOOGLE
+    assert e.fixes
+
+
 # ---- ordering: specific before broad -----------------------------------------
 
 def test_disk_full_is_matched_before_the_generic_file_error():

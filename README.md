@@ -3,9 +3,9 @@
 Japanese novels and manga, translated and read locally. A sibling to Night Reader, not
 a fork of it.
 
-**Status: step 2 of 5 — the novel pipeline.** Paste or upload a Japanese `.txt`,
-translate it, review what the checks flagged, approve the terms it proposed, and read
-it. Google Docs ingestion is the one part of step 2 still outstanding.
+**Status: step 2 of 5 — complete.** Bring in a Japanese novel by pasting it,
+uploading a `.txt`, or reading a Google Doc; translate it; review what the checks
+flagged; approve the terms it proposed; and read it.
 
 ---
 
@@ -25,9 +25,13 @@ So this app has three rules it does not bend:
    and the classifications `source | english | empty`. Enforced by
    `tests/test_scope_guards.py`, which fails the build on a language name in anything
    that becomes an identifier or a stored value.
-2. **Nothing publishes.** No posting path, no site adapters, no browser extension, no
-   outbound HTTP client — the import itself is refused by the same test file. That was
-   ~6,000 lines in Night Reader and the source of nearly every incident it ever had.
+2. **Nothing publishes.** No posting path, no site adapters, no browser extension.
+   That was ~6,000 lines in Night Reader and the source of nearly every incident it
+   ever had. Enforced three ways, because reading a Google Doc needs an HTTP client
+   and an *import* cannot tell "read a document you own" from "post to a site":
+   the client is confined to two modules; a test refuses any mutating Docs or Drive
+   method name inside them; and the OAuth scopes are read-only, so a write would be
+   refused at Google's end even if this code tried.
 3. **The page-read contract carries regions with geometry from day one**, for novels
    as well as manga. See below.
 
@@ -75,7 +79,7 @@ developing; a reload would kill an in-flight job, so it is off by default).
 ## Tests
 
 ```bash
-.venv\Scripts\python.exe -m pytest tests/ -q     # 592 tests
+.venv\Scripts\python.exe -m pytest tests/ -q     # 637 tests
 cd web && npm test                                # 31 tests
 ```
 
@@ -104,6 +108,8 @@ morning/          the engine — imports nothing from the web layer
   pageread.py     THE REGION CONTRACT
   japanese.py     script detection (the easy half of the language layer)
   textsource.py   paste / .txt ingestion
+  docs_source.py  Google Doc ingestion, one chapter per tab — READ ONLY
+  google_auth.py  the read-only sign-in
   glossary.py     entries with VARIANTS, and the human approval gate
   prompts.py      the Japanese prompt; the model answers under `source`
   translator.py   drives the Claude Code CLI; every tool blocked
@@ -143,7 +149,6 @@ recoverable, deleting prose is not.
 * **No character-gender check.** The glossary pins `pronoun` and the prompt treats
   that pin as authoritative, so the input exists; detecting a contradiction in the
   output is separate work and is not faked meanwhile.
-* **Google Docs ingestion.** The remaining ingestion path from step 2.
 * **Source-residue detection misses two shapes on purpose**, and says so in
   `morning/sanitize.py` with passing tests either way. Noun-only residue (`本日休業`)
   and very short utterances are not caught, because a threshold low enough to catch
@@ -158,7 +163,7 @@ recoverable, deleting prose is not.
 
 1. ~~Spine: storage, state, locks, atomic writes, job queue, errors, Activity.~~ ✔
 2. ~~Novel pipeline: translate → validate → retry → audit → reader, plus the glossary
-   and its pending queue.~~ ✔ — except Google Docs ingestion.
+   and its pending queue. Google Docs ingestion.~~ ✔
 3. Page harness with the region contract; novels flatten regions.
 4. Manga: reading order, overlay reader, script view.
 5. The Japanese site-export stripper, once real samples exist.

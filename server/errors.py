@@ -18,8 +18,8 @@ Two rules this module lives by:
   matches wins, so a rule that keys on an HTTP status must be narrowed by who threw
   it. Night Reader learned this the hard way: a Google Docs 429 was reported as the
   Claude plan's usage limit, sending the user to wait for a window that was never the
-  problem. Step 1 has no second API to confuse with the first — when Docs ingestion
-  lands in step 2, that discrimination has to come back with it.
+  problem. Now that Docs ingestion exists here, ``_is_google`` does that
+  discrimination and every status-keyed rule below is narrowed by it.
 """
 
 from __future__ import annotations
@@ -37,6 +37,10 @@ _LOG_MAX_BYTES = 1_000_000  # keep the tail; this is a breadcrumb trail, not an 
 ACTION_RETRY = "retry"
 ACTION_SETTINGS = "settings"
 ACTION_SETUP = "setup"
+# Offered on a 401 from the Docs path, so the frontend can put a
+# "Connect Google" button on the failure itself rather than making the
+# user go and find the setting.
+ACTION_CONNECT_GOOGLE = "connect-google"
 
 
 @dataclass
@@ -77,6 +81,39 @@ def _trace(exc: BaseException) -> str:
         return _detail(exc)
 
 
+def _is_google(exc: BaseException) -> bool:
+    """Whether this came from a Google client, decided without importing one.
+
+    Load-bearing, and the reason is a real incident rather than tidiness. Several
+    rules below key on an HTTP status, and the Claude SDK's errors carry statuses too
+    — so without this, a Docs 429 matched the "rate limit" rule and was reported as
+    the Claude plan's usage limit, sending the user to wait out a window that was
+    never the problem.
+
+    Decided by inspection rather than an import: this module is used on paths that
+    never touch Google, and importing the client here would also breach the scope
+    guard that confines it to two modules.
+    """
+    module = type(exc).__module__ or ""
+    if module.startswith("googleapiclient") or module.startswith("google"):
+        return True
+    # The httplib2 response object a googleapiclient HttpError carries. The Claude SDK
+    # exposes `status_code` instead and never `resp.status`, so this identifies a
+    # Google failure without claiming one of Claude's.
+    return getattr(getattr(exc, "resp", None), "status", None) is not None
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """The status a client error carries, without importing the client."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def explain(exc: BaseException) -> Explained:
     """Classify ``exc``. Never raises — an unrecognised error still yields a usable
     Explained with the raw detail and a copyable traceback."""
@@ -96,6 +133,9 @@ def _classify(exc: BaseException) -> Explained:
     name = type(exc).__name__
     low = _message(exc).lower()
     detail, trace = _detail(exc), _trace(exc)
+    # Decided once, up here, because several rules below match on a status or on text
+    # that a Google failure also carries.
+    google = _is_google(exc)
 
     def out(**kw) -> Explained:
         return Explained(detail=detail, trace=trace, **kw)
@@ -120,6 +160,48 @@ def _classify(exc: BaseException) -> Explained:
             fixes=["Check the reason shown beside the item.",
                    "Nothing was lost — the previous version is still there."],
             retryable=False, status=409,
+        )
+
+    # ---- Google, decided BEFORE the status-keyed rules below --------------------
+    # Every rule after this that keys on a status or on the words "rate limit" would
+    # otherwise claim a Google failure as one of Claude's. See _is_google.
+    if google:
+        status = _http_status(exc)
+        if status in (401, 403):
+            return out(
+                code="google-auth-expired",
+                title="Morning Reader's Google access has lapsed",
+                what="The sign-in has expired or been withdrawn. An OAuth app still "
+                     "in “Testing” has refresh tokens that expire after a "
+                     "week, which is the usual cause.",
+                fixes=["Connect Morning Reader to Google again.",
+                       "If it keeps lapsing, publish the OAuth app in the Google "
+                       "Cloud console so its tokens stop expiring."],
+                action=ACTION_CONNECT_GOOGLE, retryable=False, status=401,
+            )
+        if status == 404:
+            return out(
+                code="google-not-found", title="That document could not be found",
+                what="Google says there is no such document, or the signed-in account "
+                     "cannot see it.",
+                fixes=["Check the link is right.",
+                       "Check the document is shared with the Google account "
+                       "Morning Reader is signed in as."],
+                retryable=False, status=404,
+            )
+        if status == 429:
+            return out(
+                code="google-rate-limited", title="Google is asking us to slow down",
+                what="The Docs API rate-limited this request. This is GOOGLE's limit, "
+                     "not your Claude plan's — no translation allowance was used.",
+                fixes=["Wait a minute and try again."],
+                action=ACTION_RETRY, retryable=True, status=429,
+            )
+        return out(
+            code="google-error", title="Google could not be reached",
+            what="The request to Google failed.",
+            fixes=["Check your internet connection.", "Try again in a moment."],
+            action=ACTION_RETRY, retryable=True, status=502,
         )
 
     if name == "RateLimited" or "usage limit" in low or "rate limit" in low:
@@ -260,11 +342,17 @@ def from_http_detail(detail, status: int) -> Explained:
         return Explained(**{k: v for k, v in detail.items()
                             if k in Explained.__dataclass_fields__})
     text = detail if isinstance(detail, str) else str(detail)
-    code = {400: "bad-request", 403: "forbidden", 404: "not-found",
-            409: "conflict", 413: "too-large", 429: "rate-limited"}.get(status,
-                                                                        "request-failed")
+    code = {400: "bad-request", 401: "not-connected", 403: "forbidden",
+            404: "not-found", 409: "conflict", 413: "too-large",
+            429: "rate-limited"}.get(status, "request-failed")
+    # A 401 here always means the same thing — the Google sign-in is missing or has
+    # lapsed — so it carries the button that fixes it and a step that says so.
+    fixes = (["Connect Morning Reader to Google, then try again."]
+             if status == 401 else [])
     return Explained(
-        code=code, title=text, retryable=status in (429, 502, 503),
+        code=code, title=text, fixes=fixes,
+        action=(ACTION_CONNECT_GOOGLE if status == 401 else None),
+        retryable=status in (401, 429, 502, 503),
         detail=text, status=status,
     )
 

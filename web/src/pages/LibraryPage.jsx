@@ -98,20 +98,47 @@ function AddWork({ onAdded, onError }) {
   const [kind, setKind] = useState('novel')
   const [mode, setMode] = useState('heading')
   const [text, setText] = useState('')
+  const [source, setSource] = useState('text')   // text | docs
+  const [document, setDocument] = useState('')
+  const [google, setGoogle] = useState(null)
   const [busy, setBusy] = useState(false)
   const fileRef = useRef(null)
+
+  // Only asked for when the Google tab is opened. Most works never touch Google, and
+  // checking on every page load would be a request nobody needed.
+  useEffect(() => {
+    if (source !== 'docs' || google) return
+    api.googleStatus().then(setGoogle).catch(() => setGoogle(null))
+  }, [source, google])
+
+  const connect = async () => {
+    setBusy(true)
+    try {
+      await api.googleConnect()
+      setGoogle(await api.googleStatus())
+    } catch (err) {
+      onError(err)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const submit = async (event) => {
     event.preventDefault()
     if (busy) return
     setBusy(true)
     try {
-      const file = fileRef.current?.files?.[0]
-      // A chosen file wins over the textarea: picking one and then not noticing the
-      // box still had text in it should not silently import the wrong thing.
-      const created = file
-        ? await api.uploadTxt(file, { title, kind, mode })
-        : await api.createFromText({ title, kind, mode, text })
+      let created
+      if (source === 'docs') {
+        created = await api.createFromDoc({ document, title, kind })
+      } else {
+        const file = fileRef.current?.files?.[0]
+        // A chosen file wins over the textarea: picking one and then not noticing the
+        // box still had text in it should not silently import the wrong thing.
+        created = file
+          ? await api.uploadTxt(file, { title, kind, mode })
+          : await api.createFromText({ title, kind, mode, text })
+      }
       onAdded(created.project)
     } catch (err) {
       onError(err)
@@ -138,6 +165,58 @@ function AddWork({ onAdded, onError }) {
         </label>
       </div>
 
+      <fieldset className="mt-4">
+        <legend className="mb-1 text-xs text-muted">Where is it coming from?</legend>
+        <div className="flex flex-wrap gap-4 text-sm">
+          {[['text', 'Paste it, or a .txt file'], ['docs', 'A Google Doc']].map(
+            ([value, label]) => (
+              <label key={value} className="flex items-center gap-2">
+                <input type="radio" name="source" value={value}
+                       checked={source === value}
+                       onChange={() => setSource(value)} />
+                <span>{label}</span>
+              </label>
+            ))}
+        </div>
+      </fieldset>
+
+      {source === 'docs' && (
+        <div className="mt-4">
+          {google && !google.connected ? (
+            <div className="card p-4">
+              <p className="text-sm text-muted">
+                {google.credentials_present
+                  ? 'Morning Reader is not signed in to Google yet.'
+                  : 'No OAuth client is set up yet. Create one (Desktop app) in the '
+                    + 'Google Cloud console under APIs & Services → Credentials, '
+                    + 'download it, and save it as client_secret.json next to '
+                    + 'launch.py.'}
+              </p>
+              <p className="mt-1 text-xs text-hint">
+                It asks for read-only access to documents — this app never writes to one.
+              </p>
+              {google.credentials_present && (
+                <button type="button" className="btn btn-primary mt-3" disabled={busy}
+                        onClick={connect}>
+                  {busy ? 'Waiting for Google…' : 'Connect Google'}
+                </button>
+              )}
+            </div>
+          ) : (
+            <label className="block">
+              <span className="mb-1 block text-xs text-muted">
+                The document&rsquo;s link, or its id — one chapter per tab
+              </span>
+              <input className="field" value={document}
+                     onChange={(e) => setDocument(e.target.value)}
+                     placeholder="https://docs.google.com/document/d/…" />
+            </label>
+          )}
+        </div>
+      )}
+
+      {source === 'text' && (
+      <>
       <fieldset className="mt-4">
         <legend className="mb-1 text-xs text-muted">How should it be split?</legend>
         <div className="grid gap-1">
@@ -169,9 +248,12 @@ function AddWork({ onAdded, onError }) {
           Shift_JIS and EUC-JP files are decoded too, not just UTF-8.
         </span>
       </label>
+      </>
+      )}
 
       <div className="mt-4 flex items-center gap-2">
-        <button type="submit" className="btn btn-primary" disabled={busy}>
+        <button type="submit" className="btn btn-primary"
+                disabled={busy || (source === 'docs' && google && !google.connected)}>
           {busy ? 'Adding…' : 'Add it'}
         </button>
       </div>
