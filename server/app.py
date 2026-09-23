@@ -38,7 +38,7 @@ from morning.config import Config
 from morning.images import MAX_IMAGE_BYTES, inspect, unsupported_reason
 from morning.page_build import assemble, assemble_spans, propose_join
 from morning.pageread import TRANSLATED_KINDS, is_drawable, region_hash
-from morning.reading_order import propose_panels
+from morning.reading_order import propose_order, propose_panels
 from morning.glossary import (
     VALID_TYPES, Glossary, GlossaryEntry, glossary_lock, load_pending, save_pending,
 )
@@ -507,7 +507,7 @@ async def refresh_source(pid: str) -> dict:
 
 @app.get("/api/projects/{pid}/pages")
 def list_pages(pid: str) -> dict:
-    require_project(pid)
+    project = require_project(pid)
     doc = pages_mod.load_pages(pid)
     rows = []
     for page in doc.get("pages", []):
@@ -525,8 +525,20 @@ def list_pages(pid: str) -> dict:
             "regions": len(read.get("regions") or []),
             "confidence": (page.get("ocr") or {}).get("confidence", ""),
             "chars": pages_mod.page_chars(page),
+            # The manga side. Line TEXT is deliberately never included: this route is
+            # polled every time a job item finishes, and shipping the English would
+            # send megabytes per poll on a two-hundred-page project.
+            "order_source": (page.get("order_check") or {}).get("order_source", "model"),
+            "looks_reversed": bool(
+                (page.get("order_check") or {}).get("looks_reversed")),
+            **{k: v for k, v in pages_mod.line_counts(page).items()
+               if k in ("lines", "translated", "stale")},
         })
-    return {"pages": rows, "summary": pages_mod.summary(doc)}
+    # The project's kind travels with the payload so the pages screen can branch. It
+    # could not before, which is how a manga kept a primary Build button that wrote a
+    # prose source.json.
+    return {"pages": rows, "summary": pages_mod.summary(doc),
+            "kind": project.get("kind", pj.KIND_NOVEL)}
 
 
 @app.get("/api/projects/{pid}/pages/{page_id}")
@@ -974,6 +986,12 @@ def _manga_page_payload(page: dict) -> dict:
         "order_source": read.order_source,
         "order_note": note,
         "order_check": pages_mod.order_check(page),
+        # The geometry's own reading of the page, shipped so the reader can offer a
+        # one-click fix and preview it before applying. Free — the boxes are already
+        # stored and laying them out is arithmetic — and it is the only thing in the
+        # app that can catch a page read left-to-right, which is backwards sentence by
+        # sentence while every sentence stays fluent English.
+        "order_proposal": propose_order(read.regions),
         "counts": pages_mod.line_counts(page),
     }
 

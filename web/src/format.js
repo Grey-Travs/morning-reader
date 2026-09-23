@@ -47,6 +47,25 @@ export const PAGE_STATUS_TONE = {
   skipped: 'var(--hint)',
 }
 
+// A manga chapter's translation lifecycle. Separate from both the prose chapter
+// statuses and the page ones, because it is a third key space: a manga chapter is a run
+// of pages and "translating" is not "reading".
+export const MANGA_CHAPTER_STATUS_LABEL = {
+  '': 'Not translated',
+  queued: 'Queued',
+  translating: 'Translating...',
+  ok: 'Translated',
+  'needs-check': 'Partly translated',
+  failed: 'Failed',
+}
+
+export const MANGA_CHAPTER_STATUS_TONE = {
+  ok: 'var(--ok)',
+  translating: 'var(--accent)',
+  'needs-check': 'var(--warn)',
+  failed: 'var(--bad)',
+}
+
 // How a page can follow the one before it, in the user's words. The four seam kinds
 // from morning/pageread.py — one level up from the regions, which use the same names.
 export const JOIN_LABEL = {

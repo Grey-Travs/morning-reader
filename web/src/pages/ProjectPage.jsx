@@ -3,7 +3,10 @@ import { Link, useParams } from 'react-router-dom'
 import { api } from '../api'
 import Explained from '../components/Explained'
 import JobConsole from '../components/JobConsole'
-import { CLASS_LABEL, STATUS_LABEL, STATUS_TONE, countLabel, percent } from '../format'
+import {
+  CLASS_LABEL, MANGA_CHAPTER_STATUS_LABEL, MANGA_CHAPTER_STATUS_TONE,
+  STATUS_LABEL, STATUS_TONE, countLabel, percent,
+} from '../format'
 import { useJobStream } from '../useJobStream'
 
 // Statuses whose chapter has English worth opening. `needs-review` is included on
@@ -70,6 +73,26 @@ export default function ProjectPage() {
     await start({ ...body, kind: 'translate' })
   }
 
+  // A manga chapter is one call for the whole script, so the warning says what that
+  // buys rather than just what it costs.
+  const translateManga = async () => {
+    const count = selected.size || chapters.length
+    if (count === 0) return
+    const ok = window.confirm(
+      `Translate ${countLabel(count, 'chapter')}?
+
+`
+      + 'This uses your Claude plan. Each chapter goes in one call, so every bubble '
+      + 'is translated knowing what was said on the pages around it.')
+    if (!ok) return
+    try {
+      await api.translateManga(pid, selected.size ? { indices: [...selected] } : {})
+      refresh()
+    } catch (err) {
+      setError(err)
+    }
+  }
+
   const stop = async (stopCurrent) => {
     try {
       await api.cancel(pid, stopCurrent)
@@ -90,8 +113,13 @@ export default function ProjectPage() {
   if (!data) return <div className="page text-sm text-hint">Loading…</div>
 
   const { project, chapters, totals } = data
+  // A manga forks below the region contract: its chapters are runs of pages, its
+  // English is per region, and the server refuses the prose routes for it by name.
+  // The UI has to fork with it, or it offers buttons that 400.
+  const isManga = project.kind === 'manga'
   const queued = new Set([...(queue.pending || []), queue.current].filter((v) => v != null))
   const anySelected = selected.size > 0
+  // For a manga `stale` is a COUNT of out-of-date lines, not a boolean.
   const staleCount = chapters.filter((c) => c.stale).length
 
   const toggle = (index) => setSelected((previous) => {
@@ -134,20 +162,30 @@ export default function ProjectPage() {
       )}
 
       <div className="mb-5 flex flex-wrap items-center gap-2">
-        <button type="button" className="btn btn-primary"
-                onClick={() => translate(anySelected ? { indices: [...selected] } : {})}>
-          {anySelected
-            ? `Translate ${countLabel(selected.size, 'chapter')}`
-            : 'Translate everything'}
-        </button>
-        <button type="button" className="btn"
-                onClick={() => start(anySelected ? { indices: [...selected] } : {})}>
-          {anySelected ? 'Prepare selected' : 'Prepare everything'}
-        </button>
-        <button type="button" className="btn"
-                onClick={() => start(anySelected ? { indices: [...selected], force: true } : { force: true })}>
-          Re-prepare {anySelected ? 'selected' : 'everything'}
-        </button>
+        {isManga ? (
+          <button type="button" className="btn btn-primary" onClick={translateManga}>
+            {anySelected
+              ? `Translate ${countLabel(selected.size, 'chapter')}`
+              : 'Translate every chapter'}
+          </button>
+        ) : (
+          <>
+            <button type="button" className="btn btn-primary"
+                    onClick={() => translate(anySelected ? { indices: [...selected] } : {})}>
+              {anySelected
+                ? `Translate ${countLabel(selected.size, 'chapter')}`
+                : 'Translate everything'}
+            </button>
+            <button type="button" className="btn"
+                    onClick={() => start(anySelected ? { indices: [...selected] } : {})}>
+              {anySelected ? 'Prepare selected' : 'Prepare everything'}
+            </button>
+            <button type="button" className="btn"
+                    onClick={() => start(anySelected ? { indices: [...selected], force: true } : { force: true })}>
+              Re-prepare {anySelected ? 'selected' : 'everything'}
+            </button>
+          </>
+        )}
         {anySelected && (
           <button type="button" className="btn" onClick={() => setSelected(new Set())}>
             Clear selection
@@ -187,8 +225,12 @@ export default function ProjectPage() {
               <th className="w-8 p-2" />
               <th className="p-2 text-left font-normal text-hint">#</th>
               <th className="p-2 text-left font-normal text-hint">Title</th>
-              <th className="p-2 text-left font-normal text-hint">What</th>
-              <th className="p-2 text-right font-normal text-hint">Paragraphs</th>
+              <th className="p-2 text-left font-normal text-hint">
+                {isManga ? 'Pages' : 'What'}
+              </th>
+              <th className="p-2 text-right font-normal text-hint">
+                {isManga ? 'Lines' : 'Paragraphs'}
+              </th>
               <th className="p-2 text-left font-normal text-hint">Status</th>
             </tr>
           </thead>
@@ -202,24 +244,53 @@ export default function ProjectPage() {
                 </td>
                 <td className="p-2 text-hint">{chapter.index}</td>
                 <td className="max-w-0 truncate p-2 font-source">
-                  {READABLE.has(chapter.status) ? (
+                  {isManga ? (
+                    <Link to={`/work/${pid}/manga/${chapter.index}`}
+                          style={{ color: 'inherit' }}>{chapter.title}</Link>
+                  ) : READABLE.has(chapter.status) ? (
                     <Link to={`/work/${pid}/read/${chapter.index}`}
                           style={{ color: 'inherit' }}>{chapter.title}</Link>
                   ) : chapter.title}
                 </td>
                 <td className="p-2">
-                  <span className="pill text-hint">
-                    {CLASS_LABEL[chapter.class] || chapter.class}
-                  </span>
+                  {isManga ? (
+                    <span className="text-hint">
+                      {chapter.pages}
+                      {chapter.silent_pages > 0
+                        && ` (${chapter.silent_pages} with no text)`}
+                    </span>
+                  ) : (
+                    <span className="pill text-hint">
+                      {CLASS_LABEL[chapter.class] || chapter.class}
+                    </span>
+                  )}
                 </td>
-                <td className="p-2 text-right text-hint">{chapter.paragraph_count}</td>
+                <td className="p-2 text-right text-hint">
+                  {isManga
+                    ? `${chapter.translated} / ${chapter.lines}`
+                    : chapter.paragraph_count}
+                </td>
                 <td className="p-2">
-                  <span style={{ color: STATUS_TONE[chapter.status] || 'var(--hint)' }}>
+                  <span style={{
+                    color: (isManga ? MANGA_CHAPTER_STATUS_TONE : STATUS_TONE)[
+                      chapter.status] || 'var(--hint)',
+                  }}>
                     {queued.has(chapter.index) && running
                       ? (queue.current === chapter.index ? 'Working…' : 'Queued')
-                      : STATUS_LABEL[chapter.status] ?? chapter.status}
+                      : (isManga ? MANGA_CHAPTER_STATUS_LABEL : STATUS_LABEL)[
+                          chapter.status] ?? chapter.status}
                   </span>
-                  {chapter.stale && (
+                  {isManga && chapter.stale > 0 && (
+                    <span className="ml-2 pill" style={{ color: 'var(--warn)' }}>
+                      {chapter.stale} out of date
+                    </span>
+                  )}
+                  {isManga && chapter.unchecked_pages > 0 && (
+                    <span className="ml-2 pill" style={{ color: 'var(--warn)' }}>
+                      {chapter.unchecked_pages} unchecked
+                    </span>
+                  )}
+                  {!isManga && chapter.stale && (
                     <span className="ml-2 pill" style={{ color: 'var(--warn)' }}>changed</span>
                   )}
                   {chapter.error && (

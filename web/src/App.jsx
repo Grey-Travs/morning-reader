@@ -9,6 +9,8 @@ const ActivityPage = lazy(() => import('./pages/ActivityPage'))
 const ReaderPage = lazy(() => import('./pages/ReaderPage'))
 const GlossaryPage = lazy(() => import('./pages/GlossaryPage'))
 const PagesPage = lazy(() => import('./pages/PagesPage'))
+const MangaReaderPage = lazy(() => import('./pages/MangaReaderPage'))
+const MangaScriptPage = lazy(() => import('./pages/MangaScriptPage'))
 
 const NAV = [
   { to: '/', label: 'Library', end: true },
@@ -65,6 +67,8 @@ export default function App() {
           <Route path="/work/:pid/read/:index" element={<ReaderPage />} />
           <Route path="/work/:pid/glossary" element={<GlossaryPage />} />
           <Route path="/work/:pid/pages" element={<PagesPage />} />
+          <Route path="/work/:pid/manga/:index" element={<MangaReaderPage />} />
+          <Route path="/work/:pid/manga/:index/script" element={<MangaScriptPage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </Suspense>

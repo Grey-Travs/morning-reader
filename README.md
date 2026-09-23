@@ -3,9 +3,11 @@
 Japanese novels and manga, translated and read locally. A sibling to Night Reader, not
 a fork of it.
 
-**Status: step 3 of 5 — complete.** Bring in a Japanese novel by pasting it,
+**Status: step 4 of 5 — complete.** Bring in a Japanese novel by pasting it,
 uploading a `.txt`, reading a Google Doc, or photographing the pages; translate it;
-review what the checks flagged; approve the terms it proposed; and read it.
+review what the checks flagged; approve the terms it proposed; and read it. Manga works
+too: photograph the pages, read them into regions, translate a chapter in one call, and
+read it with the English over the art.
 
 ---
 
@@ -93,6 +95,68 @@ A page's filename carries a monotonic `seq`, never its position, so reordering
 rewrites the manifest only — it never renames a file, which would break image caching
 in the browser and race an in-flight read holding a path.
 
+## Reading a manga
+
+A manga forks below the region contract and shares everything above it. Add the work as
+*Photographs or scans* with kind **manga**, add the pages, read them — all exactly as a
+scanned novel — and then the paths diverge:
+
+* **A manga chapter is a RUN OF PAGES**, recorded in `pages.json`. It never becomes
+  prose, so a manga never writes `source.json`. That is enforced rather than
+  encouraged: `POST /run` refuses `translate` and `prepare` on a manga *by name*, the
+  prose reader 404s pointing at the manga one, and a manga's chapter rows deliberately
+  omit the two fields (`class`, `paragraph_count`) the prose UI keys on, so a row
+  structurally cannot be offered the wrong button.
+* **Its chapters include every non-skipped page**, including ones you have not checked.
+  The novel rule excludes those because once prose is concatenated there is no way to
+  point at the un-reviewed part again — but in a manga every line stays bolted to its
+  page and its box, so it *can* be pointed at, and it is. A wordless action page has no
+  text to review at all and is frequently the climax; dropping it would be a scene
+  nobody ever sees.
+* **The whole chapter's script is ONE call.** A bubble in isolation is frequently
+  untranslatable: Japanese omits the subject, and the referent is routinely established
+  on the *previous page*. A 20-page chapter is ~150 lines and a few thousand characters,
+  while reading those pages already cost 20 vision calls — so translating is a few
+  percent of the chapter's spend and buying more context is nearly free.
+* **The voice contract is inherited, not forked.** `build_system_prompt` takes a
+  swappable `output_contract`, so a manga keeps the glossary block, the `[he]`/`[she]`
+  pins, the `[refers to self as 俺]` register tags and the honorific rules. Only the
+  output shape changes: one tab-separated `id  speaker  English` record per line. Tab
+  rather than JSON because a truncated JSON array yields *nothing*, while every
+  complete record before the cut is still usable.
+* **Reading order is corrected for free.** `morning/reading_order.py` recovers the
+  order from the boxes with a recursive X-Y cut that reads columns *right first*. When
+  it disagrees with the model in the specific way that means "this page was read
+  left-to-right", the reader says so and one click applies the layout's order — no
+  re-read, no bill. That failure is the reason this exists: such a page is backwards
+  sentence by sentence and every sentence is still fluent English.
+* **Panels are derived, never stored.** They are the leaves of the same cut. Asking the
+  model for a `panel` field would have meant a paid re-read of every page already
+  transcribed, to obtain something the stored boxes already imply. That trade works
+  only because a wrong panel is *presentational* — it groups lines under a heading in
+  the script view, and getting it wrong is visible and harmless.
+
+### Two rules that keep paid-for work safe
+
+**Anything a human decided is a SIBLING of `read`, never a key inside it.**
+`jobs._apply_page_result` merges a finished read with `record.update(fields)`, and
+those fields carry the whole new `read` — so anything stored inside it is destroyed by
+the next re-read. The corrected order and the English are therefore siblings.
+
+**A line is fresh only while its Japanese is unchanged.** `region_hash` is the per-line
+analogue of `source_hash`: text and nothing else, so a nudged box or a relabelled kind
+does not re-bill a line. A line that fails the check is marked stale *and kept* —
+nothing here deletes prose. This one check fails **closed**, uniquely in the codebase:
+a missing or malformed hash counts as stale, because failing open would show paid-for
+English on a bubble whose Japanese has since changed, which reads as correct and cannot
+be spotted by looking at it.
+
+Region ids are *not* an identity — `ocr._region_from` assigns `r0..rn` from the model's
+list position and the prompt never asks for an id — so a saved reading order is stored
+as the region **texts** in their order. That survives a re-read that renumbered
+everything. When the page no longer says the same things the order is not forced on;
+the model's comes back and the reader says why.
+
 ## Running it
 
 ```bash
@@ -108,8 +172,8 @@ developing; a reload would kill an in-flight job, so it is off by default).
 ## Tests
 
 ```bash
-.venv\Scripts\python.exe -m pytest tests/ -q     # 810 tests
-cd web && npm test                                # 50 tests
+.venv\Scripts\python.exe -m pytest tests/ -q     # 1068 tests
+cd web && npm test                                # 91 tests
 ```
 
 **No test makes a real model call.** The SDK's `query` is replaced by a fake async
@@ -137,7 +201,9 @@ morning/          the engine — imports nothing from the web layer
   pageread.py     THE REGION CONTRACT
   images.py       format and dimensions from the header BYTES, no Pillow
   ocr.py          reading one page image into regions
-  page_build.py   pages -> chapters: the seams, and the gaps they imply
+  page_build.py   pages -> chapters (prose) and -> spans (manga)
+  reading_order.py  reading order and panels from the boxes alone — free
+  manga.py        one manga chapter end to end: collect, call, parse
   japanese.py     script detection (the easy half of the language layer)
   textsource.py   paste / .txt ingestion
   docs_source.py  Google Doc ingestion, one chapter per tab — READ ONLY
@@ -159,7 +225,8 @@ server/
   errors.py       every failure becomes something a reader can act on
   console.py      the same events, rendered to the terminal
 web/              Vite + React interface: Library, work page, Pages, Reader,
-                  Glossary, Activity
+                  manga Reader + Script, Glossary, Activity
+  geometry.js     the browser half of the box maths, pinned against Python
 ```
 
 ## Two rules worth knowing before reading the code
@@ -191,9 +258,17 @@ recoverable, deleting prose is not.
 * **HEIC is not accepted.** Browsers cannot display it, so storing one would give a
   page with no thumbnail and no way to check the read against the image. The upload
   says so by name rather than rejecting the file as unreadable.
-* **Reading order within a page is the model's proposal and nothing corrects it yet.**
-  `order_source` is on the record and a human's value is already protected from being
-  overwritten; the editor that sets it is step 4.
+* **A speaker is attributed by the translation call and gated by a human.** A model's
+  suggestion stays visibly a suggestion until someone confirms it, a previous run's
+  guesses are never fed back into the prompt as fact, and a speaker the glossary has
+  never heard of is called out. A wrong speaker reads perfectly well and quietly turns
+  two characters into one.
+* **Two identical bubbles on one page share a staleness key.** `region_hash` is over
+  the text alone, so if a re-read swaps two regions whose Japanese is character-for-
+  character identical, their English swaps with them and neither goes stale. Including
+  the box in the hash would catch it — and would also re-bill every line on every page
+  whose boxes drifted, which is every re-read. The cheaper failure was chosen
+  deliberately.
 
 ## Build order
 
@@ -201,5 +276,5 @@ recoverable, deleting prose is not.
 2. ~~Novel pipeline: translate → validate → retry → audit → reader, plus the glossary
    and its pending queue. Google Docs ingestion.~~ ✔
 3. ~~Page harness with the region contract; novels flatten regions.~~ ✔
-4. Manga: reading order, overlay reader, script view.
+4. ~~Manga: reading order, overlay reader, script view.~~ ✔
 5. The Japanese site-export stripper, once real samples exist.

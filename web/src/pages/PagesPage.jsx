@@ -47,6 +47,12 @@ function PageCard({ pid, page, selected, onToggle, onJoin, onStatus, onMove, bus
           {page.chars > 0 && ` · ${page.chars} chars`}
         </div>
 
+        {page.looks_reversed && page.order_source !== 'user' && (
+          <p className="mt-1 text-xs" style={{ color: 'var(--warn)' }}>
+            reads left-to-right — probably backwards
+          </p>
+        )}
+
         {page.error && (
           <p className="mt-1 text-xs" style={{ color: 'var(--bad)' }}>{page.error}</p>
         )}
@@ -203,9 +209,15 @@ export default function PagesPage() {
   if (!data) return <div className="page text-sm text-hint">Loading…</div>
 
   const { pages, summary } = data
+  // A manga's chapters are runs of pages and its unchecked pages are still part of the
+  // book, so two things below read differently. The kind travels with this payload
+  // precisely so the screen can branch.
+  const isManga = data.kind === 'manga'
   const needChecking = (summary.by_status || {})['needs-check'] || 0
   const unread = pages.filter((p) => !p.regions && p.status !== 'skipped').length
-  const canBuild = summary.ready > 0
+  // A novel builds from approved pages only; a manga builds from every page that is
+  // not explicitly "not text", because its art is the content.
+  const canBuild = summary.ready > 0 || (isManga && summary.total > 0)
 
   return (
     <div className="page">
@@ -273,6 +285,11 @@ export default function PagesPage() {
             Stop
           </button>
         )}
+        {isManga && summary.chapters > 0 && (
+          <Link to={`/work/${pid}/manga/1`} className="btn no-underline">
+            Open the reader
+          </Link>
+        )}
         <button type="button" className="btn btn-primary" disabled={busy || !canBuild}
                 title={canBuild ? 'Turn the read pages into chapters'
                                 : 'Read some pages first'}
@@ -291,9 +308,13 @@ export default function PagesPage() {
             {countLabel(needChecking, 'page')} the reader was unsure about.
           </p>
           <p className="mt-1 text-sm text-muted">
-            They are left out of the build until you look — putting un-checked
-            transcription into the novel is the same mistake as reading a translation
-            nobody accepted.
+            {isManga
+              ? 'They are still part of the book — the art on an unchecked page is '
+                + 'correct, and leaving it out would put a hole in the middle of a '
+                + 'scene. Their lines are labelled in the reader instead.'
+              : 'They are left out of the build until you look — putting un-checked '
+                + 'transcription into the novel is the same mistake as reading a '
+                + 'translation nobody accepted.'}
           </p>
         </div>
       )}

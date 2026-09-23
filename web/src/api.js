@@ -135,6 +135,19 @@ export const api = {
   proposeJoins: (pid) => req(`/api/projects/${pid}/pages/propose-joins`, json({})),
   buildFromPages: (pid) => req(`/api/projects/${pid}/pages/build`, json({})),
 
+  // Manga. A manga project never touches source.json or the prose reader: its
+  // chapters are runs of pages, its English is per region, and the server refuses the
+  // prose routes for it by name rather than by accident.
+  mangaChapter: (pid, index) => req(`/api/projects/${pid}/manga/${index}`),
+  translateManga: (pid, body = {}) =>
+    req(`/api/projects/${pid}/manga/translate`, json(body)),
+  // The WHOLE permutation, never a delta — the same rule the page reorder follows,
+  // one level down. `null` clears a saved order back to the model's.
+  setPageOrder: (pid, pageId, ids) =>
+    req(`/api/projects/${pid}/pages/${pageId}/order`, json({ ids })),
+  setLine: (pid, pageId, regionId, body) =>
+    req(`/api/projects/${pid}/pages/${pageId}/lines/${regionId}`, json(body)),
+
   queueOverview: () => req('/api/queue'),
   activeJob: (pid) => req(`/api/projects/${pid}/active-job`),
 
