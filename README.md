@@ -42,7 +42,7 @@ So this app has three rules it does not bend:
 `morning/pageread.py`. Reading one page image returns regions with positions, not flat
 text:
 
-```json
+``json
 { "width": 1600, "height": 2400,
   "regions": [ { "id": "r0", "box": [x, y, w, h], "text": "…",
                  "kind": "body", "order": 0,
@@ -51,7 +51,7 @@ text:
   "meta": { "confidence": "high", "heading": null,
             "starts_mid_sentence": false, "ends_mid_sentence": true,
             "ends_mid_word": false, "notes": [] } }
-```
+``
 
 * **Novels flatten it.** `flatten()` returns exactly the string a flat-text read would
   have produced, so the prose machinery applies unchanged and novels pay nothing for
@@ -159,11 +159,11 @@ the model's comes back and the reader says why.
 
 ## Running it
 
-```bash
+``bash
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe launch.py
-```
+``
 
 It serves on **8100** — Night Reader owns 8000 and the two are meant to run side by
 side. `launch.py --reload` restarts the server on a Python change (useful while
@@ -171,10 +171,10 @@ developing; a reload would kill an in-flight job, so it is off by default).
 
 ## Tests
 
-```bash
-.venv\Scripts\python.exe -m pytest tests/ -q     # 1197 tests
+``bash
+.venv\Scripts\python.exe -m pytest tests/ -q     # 1246 tests
 cd web && npm test                                # 99 tests
-```
+``
 
 **No test makes a real model call.** The SDK's `query` is replaced by a fake async
 generator yielding real SDK message objects, so the control flow under test —
@@ -192,7 +192,7 @@ and still have the chapter fail on the same characters.
 
 ## Layout
 
-```
+``
 morning/          the engine — imports nothing from the web layer
   atomic.py       one correct atomic write (unique temp name PER CALL)
   locks.py        one re-entrant lock per file path
@@ -227,7 +227,7 @@ server/
 web/              Vite + React interface: Library, work page, Pages, Reader,
                   manga Reader + Script, Glossary, Activity
   geometry.js     the browser half of the box maths, pinned against Python
-```
+``
 
 ## Two rules worth knowing before reading the code
 
@@ -277,4 +277,19 @@ recoverable, deleting prose is not.
    and its pending queue. Google Docs ingestion.~~ ✔
 3. ~~Page harness with the region contract; novels flatten regions.~~ ✔
 4. ~~Manga: reading order, overlay reader, script view.~~ ✔
-5. The Japanese site-export stripper, once real samples exist.
+5. ~~Page furniture, derived from real samples.~~ ✔ The plan expected a stripper for
+   text copied out of a Japanese site. The samples turned out to be page images, and
+   the raws arrive clean — no viewer interface, logo or stamp — so there was nothing
+   to strip. What they do carry is printed text that is not the story: page numbers
+   in the decorated print style (`—26—`), and — on the finished English pages — a
+   site address stamped on the art, which a raw from another source can carry too.
+   `pageread.mark_furniture` decides both from the TEXT, not the reader's label, at
+   read time and again whenever a stored page is loaded, so pages already paid for are
+   corrected without a re-read. It is conservative on purpose: a bare `26` or a
+   `1-1` classroom sign is left alone, and an address inside a sentence is dialogue.
+   A missed stamp costs one visible line; story text relabelled as furniture would
+   vanish. The same step widened what a manga page translates to every kind of story
+   text — captions, body, notes and headings, not just bubbles and signs — which closes
+   the last of "Nothing is said on this page" over a page of narration boxes.
+   **A text-export stripper is still unbuilt**, and stays so until a real pasted
+   export exists to derive it from; guessing one would delete prose.

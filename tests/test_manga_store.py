@@ -279,13 +279,16 @@ class TestLineCounts:
         counts = pages_mod.line_counts(record)
         assert counts["lines"] == 1 and counts["undrawable"] == 1
 
-    def test_a_novel_page_counts_nothing(self):
-        """Prose regions are not translatable lines, so a novel's pages leave every
-        manga count at zero and the pages screen shows nothing extra."""
+    def test_prose_on_a_page_counts_as_a_line(self):
+        """Since step 5 a `body` region on a manga page is story text and is translated.
+        A novel's pages count their prose too — harmlessly: the counts are only read by
+        the manga chapter rows and the manga reader, and the pages screen never renders
+        a page's `lines`. A novel is translated from its flattened chapter, never per
+        region."""
         from morning.pageread import KIND_BODY
 
         record = page(1, regions=[region("r0", "ふつうの文章", 0, kind=KIND_BODY)])
-        assert pages_mod.line_counts(record)["lines"] == 0
+        assert pages_mod.line_counts(record)["lines"] == 1
 
 
 class TestTheSummary:
@@ -354,12 +357,17 @@ class TestTheManifest:
 # `ocr._region_from` coerces any kind it does not recognise to `body`, and the page
 # prompt also offers `caption`, `note` and `heading` as ordinary labels — `caption` is
 # literally "text attached to an illustration", which describes every manga narration
-# box. None of those are in TRANSLATED_KINDS, so they were dropped everywhere: not
-# counted, not shown, and a page made only of them reported `lines: 0` and had the
-# reader print "Nothing is said on this page" over a page covered in Japanese.
+# box. None of those used to be in TRANSLATED_KINDS, so they were dropped everywhere:
+# a page made only of them had the reader print "Nothing is said on this page" over a
+# page covered in Japanese. They are translated now; what is left out is furniture,
+# furigana, and a kind this app does not know — the last is counted as `other`.
 
 class TestRegionsThatAreNotTranslated:
-    def test_they_are_counted_rather_than_ignored(self):
+    def test_captions_and_body_text_are_lines_like_any_other(self):
+        """The first fix for this counted them as `other` on the server and left the
+        reader and script view still filtering them out — so a page of narration boxes
+        kept saying "Nothing is said on this page". They are story text; they are now
+        translated, drawn and listed like any bubble."""
         from morning.pageread import KIND_BODY, KIND_CAPTION
 
         record = page(1, regions=[region("r0", Q, 0, kind=KIND_CAPTION),
@@ -367,12 +375,25 @@ class TestRegionsThatAreNotTranslated:
 
         counts = pages_mod.line_counts(record)
 
-        assert counts["lines"] == 0
-        assert counts["other"] == 2
+        assert counts["lines"] == 2
+        assert counts["other"] == 0
 
-    def test_a_page_of_them_is_not_a_silent_page(self):
+    def test_page_furniture_and_furigana_are_neither_lines_nor_other(self):
+        """A page number or a reading gloss is not story text somebody failed to
+        translate; counting it would make every numbered page look unfinished."""
+        from morning.pageread import KIND_FURIGANA
+
+        record = page(1, regions=[region("r0", "—26—", 0, kind=KIND_BUBBLE),
+                                  region("r1", "ひかる", 1, kind=KIND_FURIGANA),
+                                  region("r2", "somesite.com", 2, kind=KIND_BUBBLE)])
+
+        counts = pages_mod.line_counts(record)
+
+        assert counts["lines"] == 0 and counts["other"] == 0
+
+    def test_a_page_of_captions_is_not_a_silent_page(self):
         """`silent_pages` is what the reader's "Nothing is said on this page" copy is
-        gated on. A page covered in Japanese is not silent."""
+        gated on. A page covered in narration boxes is not silent."""
         from morning.pageread import KIND_CAPTION
 
         record = page(1, regions=[region("r0", Q, 0, kind=KIND_CAPTION)])
@@ -381,7 +402,20 @@ class TestRegionsThatAreNotTranslated:
 
         counts = pages_mod.chapter_counts(doc, doc["chapters"][0])
 
-        assert counts["other"] == 1
+        assert counts["lines"] == 1
+        assert counts["silent_pages"] == 0
+
+    def test_a_kind_this_app_does_not_know_is_other_not_silence(self):
+        """What `other` is still for. A stored region keeps whatever kind is on disk —
+        a hand-edited manifest, or one written by a later version — and its text is
+        neither translated nor allowed to vanish."""
+        record = page(1, regions=[region("r0", Q, 0, kind="from-the-future")])
+        doc = {"pages": [record],
+               "chapters": [{"index": 1, "page_ids": [record["id"]]}]}
+
+        counts = pages_mod.chapter_counts(doc, doc["chapters"][0])
+
+        assert counts["lines"] == 0 and counts["other"] == 1
         assert counts["silent_pages"] == 0
 
     def test_a_page_with_genuinely_nothing_on_it_still_is(self):
@@ -395,9 +429,7 @@ class TestRegionsThatAreNotTranslated:
         assert counts["silent_pages"] == 1
 
     def test_an_empty_region_of_a_non_translated_kind_is_not_counted(self):
-        from morning.pageread import KIND_CAPTION
-
-        record = page(1, regions=[region("r0", "   ", 0, kind=KIND_CAPTION)])
+        record = page(1, regions=[region("r0", "   ", 0, kind="from-the-future")])
         assert pages_mod.line_counts(record)["other"] == 0
 
 

@@ -35,7 +35,8 @@ from morning.atomic import (
 )
 from morning.images import ImageInfo
 from morning.pageread import (
-    GLUE_NONE, JOIN_KINDS, PROSE_KINDS, TRANSLATED_KINDS, apply_text_order, flatten,
+    FURNITURE_KINDS, GLUE_NONE, JOIN_KINDS, KIND_FURIGANA, PROSE_KINDS,
+    TRANSLATED_KINDS, apply_text_order, flatten,
     is_drawable, order_texts, page_from_dict, region_hash,
     # Aliased: this module defines its own `reorder` for the PAGE order, and a
     # bare import would be shadowed by it — silently sending a list of region
@@ -476,14 +477,20 @@ def line_counts(page: dict) -> dict:
     lines = page.get("lines") or {}
     total = translated = stale = undrawable = 0
 
-    # Regions that carry text and are NOT translated — `body`, `caption`, `note`,
-    # `heading`, and anything the model labelled with a kind this app does not know
-    # (which `ocr._region_from` coerces to `body`). They were invisible: not counted,
-    # not shown, and a page made only of them reported `lines: 0` and had the reader
-    # print "Nothing is said on this page" over a page covered in Japanese.
+    # Regions that carry text and are NOT translated. Since step 5 that is only a kind
+    # this app does not know — a stored region keeps whatever kind is on disk. `body`,
+    # `caption`, `note` and `heading` used to land here too, and a page made only of
+    # them had the reader print "Nothing is said on this page" over a page covered in
+    # Japanese; they are translated now. Counted so the text never silently vanishes.
     read, _note = effective_read(page)
+    #
+    # Furniture and furigana are not counted: a page number or a reading gloss is not
+    # story text somebody failed to translate, and counting them would make every page
+    # with a page number look unfinished.
     other = sum(1 for r in read.in_order()
-                if r.kind not in TRANSLATED_KINDS and (r.text or "").strip())
+                if r.kind not in TRANSLATED_KINDS
+                and r.kind not in FURNITURE_KINDS and r.kind != KIND_FURIGANA
+                and (r.text or "").strip())
 
     for region in translatable_regions(page):
         total += 1

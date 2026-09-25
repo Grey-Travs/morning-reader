@@ -57,16 +57,31 @@ class TestWhatGetsTranslated:
         assert TRANSLATED_KINDS != SCRIPT_KINDS
         assert KIND_SIGN not in SCRIPT_KINDS
 
-    @pytest.mark.parametrize("kind", [KIND_PAGE_NUMBER, KIND_RUNNING_HEAD])
+    @pytest.mark.parametrize("kind", [KIND_PAGE_NUMBER, KIND_RUNNING_HEAD, "watermark"])
     def test_page_furniture_is_never_translated(self, kind):
         """Paying to translate a page number is the clearest waste there is, and a
-        translated running head would then be drawn over the art on every page."""
+        translated running head or site stamp would then be drawn over the art on
+        every page."""
         assert kind not in TRANSLATED_KINDS
 
-    def test_prose_and_manga_text_are_separate_sets(self):
-        """A novel flattens PROSE_KINDS; a manga translates TRANSLATED_KINDS. Neither
-        should quietly start including the other's kinds."""
-        assert not (PROSE_KINDS & TRANSLATED_KINDS)
+    def test_every_kind_of_story_text_is_translated_on_a_manga_page(self):
+        """Replaces an earlier test that asserted the manga set and PROSE_KINDS were
+        DISJOINT — which pinned the bug. The page reader offers `caption` and `body`
+        for any page and coerces unknown labels to `body`, so a manga narration box
+        filed that way was left untranslated, undrawn, and absent from the line strip,
+        and the reader said "Nothing is said on this page" over it.
+
+        The only things a manga page does not translate are furigana (a reading
+        printed beside a kanji, not a line of its own) and page furniture."""
+        from morning.pageread import FURNITURE_KINDS, KIND_FURIGANA, REGION_KINDS
+
+        assert TRANSLATED_KINDS == (
+            frozenset(REGION_KINDS) - FURNITURE_KINDS - {KIND_FURIGANA})
+
+    def test_overlapping_with_the_prose_set_is_harmless(self):
+        """A novel never reads TRANSLATED_KINDS and a manga never flattens, so the
+        overlap cannot leak one path into the other — the project's kind decides."""
+        assert PROSE_KINDS <= TRANSLATED_KINDS
 
     @pytest.mark.parametrize("kind", [KIND_BUBBLE, KIND_THOUGHT, KIND_NARRATION,
                                       KIND_ASIDE])

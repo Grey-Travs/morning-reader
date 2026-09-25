@@ -32,7 +32,7 @@ from pathlib import Path
 
 from .pageread import (
     CONFIDENCE_LEVELS, GLUE_KINDS, GLUE_NONE, JOIN_KINDS, KIND_BODY, REGION_KINDS,
-    PageMeta, PageRead, Region, from_pixels, validate,
+    PageMeta, PageRead, Region, from_pixels, mark_furniture, validate,
 )
 
 # What the model is asked to produce. JSON, for the reason in the module docstring.
@@ -65,6 +65,7 @@ should contain the text and not much else.
 - `note` — a footnote or margin gloss
 - `furigana` — a small reading printed beside or above a kanji
 - `page-number`, `running-head` — page furniture
+- `watermark` — a site name or web address stamped onto the art
 - `bubble`, `thought`, `narration`, `sfx`, `sign`, `aside` — comic text
 
 **Seams.** For every region after the first, say how it follows the previous one in
@@ -255,6 +256,9 @@ def parse_page_response(raw: str, *, width: int = 0, height: int = 0) -> PageRea
             if region is not None:
                 regions.append(region)
     _renumber(regions)
+    # Printed page numbers and site stamps are decided from their text, not left
+    # to the model's label. See `pageread.mark_furniture`.
+    mark_furniture(regions)
 
     meta_raw = data.get("meta")
     meta_raw = meta_raw if isinstance(meta_raw, dict) else {}

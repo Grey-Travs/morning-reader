@@ -59,6 +59,8 @@ in the first few KB), which needs no Pillow and does not trust the client.
 from __future__ import annotations
 
 import hashlib
+import re
+import unicodedata
 from dataclasses import dataclass, field, replace
 
 # How a region (or a page) follows the one before it. Language-neutral: it describes
@@ -83,6 +85,9 @@ KIND_NOTE = "note"                  # footnote, translator note, margin gloss
 KIND_FURIGANA = "furigana"          # ruby: a reading printed beside/above a kanji
 KIND_PAGE_NUMBER = "page-number"
 KIND_RUNNING_HEAD = "running-head"  # the title repeated in the margin of every page
+# A site's stamp on the art — "somesite.com" lettered into a panel. Never offered to the
+# model as a label: only `furniture_kind` below assigns it, from the text itself.
+KIND_WATERMARK = "watermark"
 
 # Manga pages.
 KIND_BUBBLE = "bubble"              # speech
@@ -94,9 +99,13 @@ KIND_ASIDE = "aside"                # small marginal text, often the author's
 
 REGION_KINDS = (
     KIND_BODY, KIND_HEADING, KIND_CAPTION, KIND_NOTE, KIND_FURIGANA,
-    KIND_PAGE_NUMBER, KIND_RUNNING_HEAD,
+    KIND_PAGE_NUMBER, KIND_RUNNING_HEAD, KIND_WATERMARK,
     KIND_BUBBLE, KIND_THOUGHT, KIND_NARRATION, KIND_SFX, KIND_SIGN, KIND_ASIDE,
 )
+
+# On the page, printed, and never part of the story: the book's own furniture and a
+# site's stamp. Neither path ever translates, flattens or draws these.
+FURNITURE_KINDS = frozenset({KIND_PAGE_NUMBER, KIND_RUNNING_HEAD, KIND_WATERMARK})
 
 # The kinds that ARE the novel's text. Everything else is on the page without being
 # part of it.
@@ -120,15 +129,26 @@ PROSE_KINDS = frozenset({KIND_BODY, KIND_CAPTION, KIND_NOTE})
 # are named separately rather than lumped in.
 SCRIPT_KINDS = frozenset({KIND_BUBBLE, KIND_THOUGHT, KIND_NARRATION, KIND_ASIDE})
 
-# The kinds a manga translation call is GIVEN. Wider than SCRIPT_KINDS because a sign
-# and a sound effect are translated too — the docstring above already says so — while
-# the script view lists only what is spoken. Two sets, because "what is translated" and
-# "what is listed as dialogue" are different questions that happen to overlap.
+# The kinds a manga translation call is GIVEN: every region on the page that is story
+# text, whatever the reader happened to call it.
 #
-# Page furniture is excluded on purpose: paying to translate a page number is the
-# clearest possible waste, and a translated running head would then be drawn over the
-# art on every page of the book.
-TRANSLATED_KINDS = SCRIPT_KINDS | {KIND_SIGN, KIND_SFX}
+# It used to be only the comic kinds plus signs and sound effects, and that was a bug.
+# The page reader is shown one prompt for books and comics alike, which offers
+# `caption` ("text attached to an illustration" — every manga narration box fits) and
+# `body`, and it coerces any label it does not recognise to `body`. Regions labelled
+# that way were left out of the translation, out of the overlay and out of the line
+# strip, and a page of narration boxes told the owner "Nothing is said on this page"
+# over a page covered in Japanese.
+#
+# What is left out is only what is not story text: furigana, which is a reading
+# printed beside a kanji rather than a line of its own, and page furniture — paying to
+# translate a page number is the clearest possible waste, and a translated running head
+# or watermark would be drawn over the art on every page of the book.
+#
+# The prose path never reads this set; a novel flattens PROSE_KINDS. So overlapping
+# with it is harmless — the project's kind decides which path runs.
+TRANSLATED_KINDS = (SCRIPT_KINDS | PROSE_KINDS
+                    | {KIND_SIGN, KIND_SFX, KIND_HEADING})
 
 CONFIDENCE_LEVELS = ("high", "medium", "low")
 
@@ -499,6 +519,80 @@ def gaps(page: PageRead) -> list[str]:
             for r in page.in_order() if r.join_prev == JOIN_GAP]
 
 
+# ---- page furniture ----------------------------------------------------------
+#
+# Step 5, and deliberately small, because the samples said so. The plan expected a
+# stripper for text copied out of a Japanese site — a header, a reading-time line, a
+# repeated title — derived from real exports the way the Korean app's was. The real
+# samples were page images, and the raws arrived clean: no viewer interface, no logo,
+# no stamp. There was nothing to strip.
+#
+# What the samples DID carry, on story pages, was two kinds of printed text that are
+# not the story:
+#
+#   * page numbers printed in the decorated print style: —26—, —9—, —13—
+#   * a site's address stamped onto the art: somesite.com, sometimes split over lines
+#
+# The page reader is ASKED to label a page number `page-number`, but that is the
+# model's judgement on every page, and a miss is expensive in both directions: in a
+# novel "—26—" is flattened into the prose, and in a manga it is translated and drawn
+# over the art. So these two shapes are decided here, from the text, every time.
+#
+# Only shapes that can never be story text qualify. A bare "26" is left to the model —
+# it could be a score, a room, a countdown — and so is anything with digits on both
+# sides of the dash: the samples themselves contain a classroom sign reading "1−1" and
+# a date chalked on a blackboard, and both are story.
+
+_DASHES = "-‐‑‒–—―ー~〜"
+_PAGE_NUMBER_RE = re.compile(rf"^[{_DASHES}]+\s*\d{{1,4}}\s*[{_DASHES}]+$")
+
+# A web address and nothing else. The top-level domain is a known list rather than any
+# run of letters, so "mr.tanaka" in a romaji sign is not mistaken for one.
+_TLDS = ("com|net|org|jp|io|co|me|info|site|xyz|app|tv|cc|to|ru|link|online|club|"
+         "top|biz|us|uk|kr|cn|fun|moe|blog|page|web")
+_DOMAIN_RE = re.compile(
+    rf"^(?:https?://)?(?:www\.)?"
+    rf"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*"
+    rf"\.(?:{_TLDS})(?:/\S*)?$")
+
+
+def furniture_kind(text: str) -> str | None:
+    """The furniture kind a region's text PROVES it is, or None.
+
+    Normalised first (NFKC folds －２６－ into -26-). For the address, LINE BREAKS are
+    joined, because a stylised logo stacked over two lines reads back as "hiraya" and
+    "reads.com" — but a space is not, since "visit somesite.com" is somebody talking.
+    The two mistakes are not equal: a stamp left as a line costs one visible, harmless
+    line, while story text relabelled as furniture silently disappears.
+    """
+    folded = unicodedata.normalize("NFKC", text or "").strip()
+    if not folded:
+        return None
+    if _PAGE_NUMBER_RE.match(folded):
+        return KIND_PAGE_NUMBER
+    if _DOMAIN_RE.match("".join(line.strip() for line in folded.splitlines()).lower()):
+        return KIND_WATERMARK
+    return None
+
+
+def mark_furniture(regions: list[Region]) -> int:
+    """Relabel every region whose text proves it is furniture. Returns how many.
+
+    Applied when a page is read AND when a stored read is loaded, so pages transcribed
+    before this rule existed are corrected on sight rather than needing a paid re-read.
+    Idempotent, and a region the reader already filed as furniture is left as it is.
+    """
+    changed = 0
+    for region in regions:
+        if region.kind in FURNITURE_KINDS:
+            continue
+        kind = furniture_kind(region.text)
+        if kind is not None:
+            region.kind = kind
+            changed += 1
+    return changed
+
+
 # ---- serialization -----------------------------------------------------------
 # Tolerant, like every other loader here: a malformed record degrades to something
 # usable rather than raising. A page transcribed at real cost must not become
@@ -552,6 +646,9 @@ def page_from_dict(data: dict) -> PageRead:
     raw_regions = data.get("regions")
     regions = [region_from_dict(r, i)
                for i, r in enumerate(raw_regions if isinstance(raw_regions, list) else [])]
+    # Here, on load, as well as when a page is read: a page transcribed before the rule
+    # existed is corrected without paying to read it again. See `mark_furniture`.
+    mark_furniture(regions)
     meta_raw = data.get("meta")
     meta_raw = meta_raw if isinstance(meta_raw, dict) else {}
     heading = meta_raw.get("heading")
