@@ -623,6 +623,9 @@ def list_pages(pid: str) -> dict:
             "order_source": (page.get("order_check") or {}).get("order_source", "model"),
             "looks_reversed": bool(
                 (page.get("order_check") or {}).get("looks_reversed")),
+            # How many regions a human has corrected — so "Read again" can say, before
+            # anything is spent, that a new reading replaces them.
+            "corrections": len(pages_mod.corrections_of(page)),
             **{k: v for k, v in pages_mod.line_counts(page).items()
                if k in ("lines", "translated", "stale")},
         })
@@ -635,12 +638,54 @@ def list_pages(pid: str) -> dict:
 
 @app.get("/api/projects/{pid}/pages/{page_id}")
 def get_page(pid: str, page_id: str) -> dict:
-    """One page in full, including its regions — what the overlay reader draws."""
-    require_project(pid)
-    page = pages_mod.find_page(pages_mod.load_pages(pid), page_id)
-    if page is None:
+    """One page in full: what the page-check screen shows beside the photograph.
+
+    The regions come in READING order as they will actually be used — the human's
+    order and corrections applied — each with the model's own reading beside it, so a
+    correction can always be seen for what it changed and taken back.
+    """
+    project = require_project(pid)
+    doc = pages_mod.load_pages(pid)
+    pages = doc.get("pages", [])
+    position = next((i for i, p in enumerate(pages) if str(p.get("id")) == page_id),
+                    None)
+    if position is None:
         raise HTTPException(404, "There is no page with that id in this project.")
-    return {"page": page, "text": pages_mod.page_text(page)}
+    page = pages[position]
+
+    read, note = pages_mod.effective_read(page)
+    corrections = pages_mod.corrections_of(page)
+    regions = []
+    for region in read.in_order():
+        correction = corrections.get(region.id)
+        applied = correction is not None and region.text == correction["to"]
+        regions.append({
+            "id": region.id, "kind": region.kind, "order": region.order,
+            "box": [round(float(v), 6) for v in region.box],
+            "text": region.text,
+            "original": correction["from"] if applied else region.text,
+            "corrected": applied,
+        })
+    corrected_at = max((c.get("at") or "" for c in corrections.values()), default="")
+    return {
+        "page": page,
+        "kind": project.get("kind", pj.KIND_NOVEL),
+        "text": pages_mod.page_text(page),
+        "regions": regions,
+        # WHY the reader was unsure. Recorded on every read and shown nowhere until
+        # now, so "Check this" gave nobody anything to check against.
+        "notes": list(read.meta.notes) if page.get("read") else [],
+        "heading": read.meta.heading,
+        "note": note,
+        "position": {
+            "index": position, "total": len(pages),
+            "prev": str(pages[position - 1].get("id")) if position > 0 else None,
+            "next": (str(pages[position + 1].get("id"))
+                     if position + 1 < len(pages) else None),
+        },
+        "built_at": (doc.get("build") or {}).get("at"),
+        "corrected_at": corrected_at or None,
+    }
 
 
 @app.get("/api/projects/{pid}/pages/{page_id}/image")
@@ -740,6 +785,14 @@ async def upload_pages(pid: str, files: list[UploadFile],
 class PageSelection(BaseModel):
     ids: list[str] | None = None   # None = every page that still needs it
     force: bool = False
+    # A note for the reader about THESE pages — "the bottom two lines are cut off".
+    # Sent WITH the request rather than saved separately first: Night Reader saved it
+    # on blur and did not wait, so a note typed just before pressing the button could
+    # arrive after the read had already started without it.
+    hint: str | None = None
+
+
+MAX_HINT_CHARS = 500
 
 
 @app.post("/api/projects/{pid}/pages/read")
@@ -768,8 +821,14 @@ async def read_pages(pid: str, req: PageSelection = PageSelection()) -> dict:
     with pages_mod.mutate_pages(pid) as fresh:
         for seq in seqs:
             page = pages_mod.find_by_seq(fresh, seq)
-            if page is not None:
-                pages_mod.set_status(fresh, page["id"], pages_mod.STATUS_QUEUED)
+            if page is None:
+                continue
+            # Not onto a page already in flight: the worker read its snapshot when the
+            # item started, so the note would miss this read and then be wiped by it.
+            if req.hint is not None and page.get("status") not in (
+                    pages_mod.STATUS_QUEUED, pages_mod.STATUS_RUNNING):
+                page["hint"] = req.hint.strip()[:MAX_HINT_CHARS]
+            pages_mod.set_status(fresh, page["id"], pages_mod.STATUS_QUEUED)
 
     items = [(seq, req.force, task_mod.TASK_READ_PAGE) for seq in seqs]
     return jobs.enqueue(pid, cfg, items)
@@ -839,10 +898,62 @@ def set_page_status(pid: str, page_id: str, req: PageStatusRequest) -> dict:
     if req.status not in (pages_mod.STATUS_EDITED, pages_mod.STATUS_OK,
                           pages_mod.STATUS_SKIPPED, pages_mod.STATUS_NEW):
         raise HTTPException(400, f"A page cannot be set to {req.status!r}.")
+    status = req.status
     with pages_mod.mutate_pages(pid) as doc:
-        if pages_mod.set_status(doc, page_id, req.status) is None:
+        page = pages_mod.find_page(doc, page_id)
+        if page is None:
             raise HTTPException(404, "There is no page with that id in this project.")
-    return {"status": req.status}
+        # "Put it back" on a page that has ALREADY been read. As "new" it was stuck:
+        # the sweep skips a page with a read, it was not approved, and "Looks right"
+        # is only offered on pages to check — so the one way back was a paid re-read.
+        # A human is putting it back into the book, so it goes where a human looks.
+        if status == pages_mod.STATUS_NEW and page.get("read"):
+            status = pages_mod.STATUS_NEEDS_CHECK
+        pages_mod.set_status(doc, page_id, status)
+    return {"status": status}
+
+
+class CorrectionRequest(BaseModel):
+    text: str
+
+
+MAX_REGION_CHARS = 20_000
+
+
+@app.post("/api/projects/{pid}/pages/{page_id}/regions/{region_id}")
+def correct_region(pid: str, page_id: str, region_id: str,
+                   req: CorrectionRequest) -> dict:
+    """A human's correction of what one region says.
+
+    Night Reader's rule, carried: a hand-edited page is the reader's word, so it is
+    marked checked — ``edited`` counts as ready to build. Stored BESIDE the read, not
+    in it, and applied only while the region still says what the model read.
+
+    Refused while the page is queued or being read. Night Reader accepted it, and the
+    read then landed on top and silently replaced the correction.
+    """
+    require_project(pid)
+    if len(req.text) > MAX_REGION_CHARS:
+        raise HTTPException(413, "That is far longer than one block of text on a page.")
+    with pages_mod.mutate_pages(pid) as doc:
+        page = pages_mod.find_page(doc, page_id)
+        if page is None:
+            raise HTTPException(404, "There is no page with that id in this project.")
+        if page.get("status") in (pages_mod.STATUS_QUEUED, pages_mod.STATUS_RUNNING):
+            raise HTTPException(409, "This page is being read. Wait for it to finish, "
+                                     "then correct it.")
+        if not page.get("read"):
+            raise HTTPException(400, "This page has not been read yet, so there is "
+                                     "nothing on it to correct.")
+        region = pages_mod.set_correction(page, region_id, req.text)
+        if region is None:
+            raise HTTPException(404, "There is no region with that id on this page.")
+        pages_mod.set_status(doc, page_id, pages_mod.STATUS_EDITED)
+        page["order_check"] = pages_mod.order_check(page)
+        _read, note = pages_mod.effective_read(page)
+    return {"region": region, "status": pages_mod.STATUS_EDITED, "note": note,
+            "text": pages_mod.page_text(page),
+            "corrections": len(pages_mod.corrections_of(page))}
 
 
 @app.post("/api/projects/{pid}/pages/propose-joins")

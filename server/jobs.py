@@ -416,6 +416,11 @@ def _apply_page_result(pid: str, page_id: str, fields: dict) -> dict:
         record = pages_mod.find_page(doc, page_id)
         if record is None:
             return {}
+        # Skipped by a human WHILE it was being read. The read is kept — it is paid
+        # for — but the human's "not part of the text" stands; the result's status
+        # would otherwise put a cover page back into the novel.
+        if record.get("status") == pages_mod.STATUS_SKIPPED:
+            fields = {k: v for k, v in fields.items() if k != "status"}
         record.update(fields)
         # Recomputed HERE, on every read, because this is the only moment the regions
         # change. It used to be written only when a human set an order — so on a page
@@ -614,10 +619,21 @@ async def _run_manifest_item(job: Job, context, cfg: Config, index: int, force: 
         return strikes, "continue"
 
     record_id = store.identify(record)
+    label = store.label(record, index)
+    # Skipped by a human after it was queued. Reading it anyway spent the allowance on
+    # a page they had just said was not text, and the result then overwrote the skip.
+    # Checked here, at the last moment before anything is billed.
+    if store is PAGE_STORE and record.get("status") == pages_mod.STATUS_SKIPPED:
+        job.queued.discard(key)
+        job.current = None
+        job.publish({"type": "item", "index": index, "kind": kind,
+                     store.id_field: record_id, "title": label,
+                     "status": pages_mod.STATUS_SKIPPED, "refused": True,
+                     "error": "skipped before it was read"})
+        return strikes, "continue"
     # NOT record["status"] — that already reads "queued", because this item was marked
     # when the work was accepted. Restoring it would leave it queued forever.
     resting = store.resting(record)
-    label = store.label(record, index)
 
     job.abort.clear()
     job.live = {"index": index, "title": label, "chars": 0, "kind": kind,

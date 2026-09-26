@@ -17,7 +17,7 @@ from __future__ import annotations
 import pytest
 
 from morning.chapters import Chapter
-from morning.page_build import Join, assemble, propose_join
+from morning.page_build import Join, assemble, has_unclosed_quote, propose_join
 from morning.pageread import (
     GLUE_NONE, GLUE_SPACE, JOIN_CHAPTER, JOIN_GAP, JOIN_PARAGRAPH, JOIN_SENTENCE,
     KIND_BODY, KIND_PAGE_NUMBER, PageMeta, PageRead, Region, from_pixels,
@@ -136,6 +136,107 @@ def test_a_page_with_no_read_still_gets_a_proposal():
     join = propose_join("", LATER, {"seq": 1}, {"seq": 2})
 
     assert join.kind in (JOIN_PARAGRAPH, JOIN_SENTENCE, JOIN_GAP, JOIN_CHAPTER)
+
+
+# ---- speech that runs across the break ----------------------------------------
+# Night Reader's rule: a page that ends inside a quotation carries on onto the next.
+# It was not carried over, so a page ending 「明日の朝、駅で was never evidence of
+# anything, and one ending 「今日は雨だ。 was taken as a finished paragraph.
+
+OPEN = "「今日は雨だ。"                       # speech still open, full stop and all
+CONTINUES = "明日は晴れるだろう。」と彼は言った。"
+
+
+def _join(previous_text, following_text, **flags):
+    ends = {k: v for k, v in flags.items() if k.startswith("ends")}
+    starts = {k: v for k, v in flags.items() if k.startswith("starts")}
+    return propose_join(previous_text, following_text,
+                        _page(previous_text, **ends), _page(following_text, **starts))
+
+
+def test_open_speech_continues_onto_the_next_page():
+    join = _join("「あの時言ったじゃない", "だからもうやめて。」")
+
+    assert join.kind == JOIN_SENTENCE
+    assert "quotation is still open" in join.reason
+
+
+def test_a_full_stop_inside_open_speech_does_not_end_the_paragraph():
+    """「今日は雨だ。 ends in 。 and is still inside the speech. The full-stop rule
+    alone split one line of dialogue into two paragraphs."""
+    assert _join(OPEN, CONTINUES).kind == JOIN_SENTENCE
+
+
+def test_open_speech_is_not_mistaken_for_a_missing_page():
+    """A model flags an open 「 as ending mid-sentence without flagging the next page
+    as starting mid-sentence. That disagreement read as a page never photographed, and
+    the build warned about a hole that was not there."""
+    join = _join(OPEN, CONTINUES, ends_mid_sentence=True, starts_mid_sentence=False)
+
+    assert join.kind == JOIN_SENTENCE
+    assert "may be missing" not in join.reason
+
+
+def test_a_fresh_quotation_is_not_the_same_speech():
+    """The next page opening its own 「 cannot be continuing the open one."""
+    assert _join("「あの時言ったじゃない", "「何の話？」").kind != JOIN_SENTENCE
+
+
+@pytest.mark.parametrize("previous_text,following_text", [
+    ("「彼が『明日", "来る』と言った」"),     # both open
+    ("「彼は『行く』", "と言った。」"),         # inner closed, outer still open — and
+])                                           # the trailing 』 alone looks like an end
+def test_nested_quotation_marks(previous_text, following_text):
+    assert _join(previous_text, following_text).kind == JOIN_SENTENCE
+
+
+def test_a_closed_quotation_still_ends_a_sentence():
+    """Japanese usually drops the 。 before 」, so 「行くぞ」 is a whole line of speech.
+    Night Reader's own end-of-sentence check does not know that; it stays out."""
+    assert _join("「行くぞ」", "彼は歩き出した。").kind == JOIN_PARAGRAPH
+
+
+def test_a_chapter_heading_still_beats_open_speech():
+    previous = _page("「今日は")
+    following = _page("朝が来た。", heading="第2話")
+
+    assert propose_join("「今日は", "朝が来た。", previous, following).kind == \
+        JOIN_CHAPTER
+
+
+def test_open_speech_before_a_page_with_no_prose_proves_nothing():
+    """An illustration or a title page flattens to no prose. An empty first character
+    must not count as 'not an opener' — the frozenset rather than a string is what
+    stops that."""
+    assert _join(OPEN, "").kind != JOIN_SENTENCE
+
+
+def test_vertical_typesetting_quotes_pair_too():
+    assert _join("〝今日は雨だ。", "明日だ〟と言った。").kind == JOIN_SENTENCE
+
+
+class TestIsAQuotationStillOpen:
+    @pytest.mark.parametrize("text", [
+        "「あの時言ったじゃない", "『本の題", '"どこへ行くの', "「彼が『明日』と",
+        "〝今日は",
+    ])
+    def test_open(self, text):
+        assert has_unclosed_quote(text)
+
+    @pytest.mark.parametrize("text", [
+        "「あの時言ったじゃない」", "『本』", '"どこへ?" と彼が聞いた。',
+        "「x」「y」", "〝今日は〞", "", "彼女はホームに立っていた。",
+    ])
+    def test_closed(self, text):
+        assert not has_unclosed_quote(text)
+
+    def test_a_page_that_closes_old_speech_and_opens_new_speech_is_still_open(self):
+        """Whole-page counting calls this balanced — one 「 and one 」 — and it is the
+        ordinary shape of the page after a speech ran across the break."""
+        assert has_unclosed_quote("だろう。」と彼は言った。\n\n「今日は雨だ。")
+
+    def test_a_stray_closer_does_not_cancel_a_later_opener(self):
+        assert has_unclosed_quote("」と言った。「待って")
 
 
 # ---- assembling --------------------------------------------------------------

@@ -43,6 +43,47 @@ _ENDS_SENTENCE = re.compile("[。！？.!?」』”)）]\\s*$")
 _STARTS_CONTINUATION = re.compile("^\\s*[」』、，をがに"
                                   "へとのもは]")
 
+# Quotation marks that open and close, for "is a quotation still open at the end of
+# this page". Carried from Night Reader's `ocr_join._QUOTE_PAIRS`, plus 〝〟 — the
+# double quotes of vertical typesetting, closed by either 〟 or 〞.
+_QUOTE_PAIRS = (("「", "」"), ("『", "』"), ("“", "”"), ("‘", "’"), ("《", "》"),
+                ("〈", "〉"), ("〝", "〟〞"))
+
+# What a page may OPEN with that starts a fresh quotation rather than continuing one.
+# A frozenset, not a string: `"" in "「『"` is True in Python, so an empty first
+# character would count as an opener.
+_OPENERS = frozenset("\"'“‘「『（([【《〈〝")
+
+
+def has_unclosed_quote(text: str) -> bool:
+    """Whether a quotation opened in this text is still open at its end.
+
+    Walked in order with the depth held at zero or above, rather than comparing whole
+    counts as Night Reader does. A light novel's page routinely starts by CLOSING the
+    speech carried over from the page before and ends inside a new one — 「…」と彼は
+    言った。「今日は — and whole counts call that balanced, on exactly the page after a
+    seam where this rule already fired.
+    """
+    text = text or ""
+    for opener, closers in _QUOTE_PAIRS:
+        depth = 0
+        for char in text:
+            if char == opener:
+                depth += 1
+            elif char in closers and depth > 0:
+                depth -= 1
+        if depth > 0:
+            return True
+    # Straight quotes do not pair, so parity is the only signal they give.
+    return text.count('"') % 2 == 1
+
+
+def _first_char(text: str) -> str:
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()[0]
+    return ""
+
 
 @dataclass
 class Join:
@@ -100,6 +141,18 @@ def propose_join(previous_text: str, following_text: str,
     if meta_prev.get("ends_mid_sentence") and meta_next.get("starts_mid_sentence"):
         return Join(JOIN_SENTENCE, GLUE_NONE, 0.9,
                     "the sentence continues across the break")
+
+    # 3b. Speech opened and never closed. A page that ends inside a quotation carries
+    #     on onto the next — unless the next opens a quotation of its own, which cannot
+    #     be the same one. Before rule 4, because a model often flags an open 「 as
+    #     "ends mid-sentence" without flagging the next page as starting mid-sentence,
+    #     and that disagreement read as a missing page that was never missing. Before
+    #     rule 5, because 「今日は雨だ。 ends in a full stop and is still inside speech.
+    #     Night Reader's rule 3, verbatim in effect.
+    first = _first_char(following_text)
+    if first and first not in _OPENERS and has_unclosed_quote(previous_text):
+        return Join(JOIN_SENTENCE, GLUE_NONE, 0.85,
+                    "a quotation is still open at the end of the previous page")
 
     # 4. They disagree, which usually means a page was never photographed: one side
     #    stops mid-sentence and the other starts cleanly. Reported rather than

@@ -144,6 +144,20 @@ def test_an_empty_region_is_dropped():
     assert validate(page) == [], "and the order is still a permutation"
 
 
+def test_ids_are_positional_whatever_the_model_volunteers():
+    """Translated lines, corrections and saved orders are all keyed by region id. Two
+    regions the model both called "zz" made each of them ambiguous about which bubble
+    it meant — and `validate` only noted it, so the read was stored that way."""
+    page = ocr.parse_page_response(_answer(regions=[
+        {"id": "zz", "box": [0, 0, 100, 100], "text": COL_A, "order": 0},
+        {"id": "zz", "box": [0, 0, 100, 100], "text": COL_B, "order": 1},
+        {"id": "r0", "box": [0, 0, 100, 100], "text": "三つ目", "order": 2},
+    ]), width=W, height=H)
+
+    assert [r.id for r in page.regions] == ["r0", "r1", "r2"]
+    assert validate(page) == []
+
+
 def test_a_region_with_no_box_keeps_its_text():
     """Losing transcribed text because a coordinate was missing would be the expensive
     failure; losing the coordinate is the cheap one."""
