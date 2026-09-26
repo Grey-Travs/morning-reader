@@ -27,8 +27,6 @@ const KIND_LABEL = {
 // translated on a manga page. Shown so nothing on the photo is unaccounted for.
 const NOT_TEXT = new Set(['page-number', 'running-head', 'watermark', 'furigana'])
 
-const IN_FLIGHT = new Set(['queued', 'reading'])
-
 // How long typing has to pause before a correction is saved. Night Reader's figure.
 const SAVE_AFTER_MS = 700
 
@@ -74,16 +72,22 @@ export default function PageCheckPage() {
   // page it was typed on, not flushed onto the new one.
   const pending = useRef({})
   const timers = useRef({})
+  // The page on screen NOW. A load started on page A can land after the arrows moved
+  // to page B — through "Looks right" and a quick arrow, say — and it used to paint
+  // A's words under B's address, where typing saved A's text onto B and approved it.
+  const showing = useRef(pageId)
+  showing.current = pageId
 
   const load = useCallback(async () => {
     try {
       const body = await api.page(pid, pageId)
+      if (showing.current !== pageId) return
       setData(body)
       setDrafts(Object.fromEntries(body.regions.map((r) => [r.id, r.text])))
       setHint(body.page.hint || '')
       setError(null)
     } catch (err) {
-      setError(err)
+      if (showing.current === pageId) setError(err)
     }
   }, [pid, pageId])
 
@@ -139,13 +143,16 @@ export default function PageCheckPage() {
   }, [pid, pageId])
 
   const change = (regionId, text) => {
+    // Against the page whose words are ON SCREEN, which is what was typed into.
+    const forPage = data?.page?.id
+    if (!forPage || forPage !== pageId) return
     setDrafts((d) => ({ ...d, [regionId]: text }))
-    pending.current[regionId] = { page: pageId, text }
+    pending.current[regionId] = { page: forPage, text }
     clearTimeout(timers.current[regionId])
     timers.current[regionId] = setTimeout(() => {
       delete pending.current[regionId]
       delete timers.current[regionId]
-      save(pageId, regionId, text)
+      save(forPage, regionId, text)
     }, SAVE_AFTER_MS)
   }
 
@@ -158,15 +165,22 @@ export default function PageCheckPage() {
   }
 
   const status = data?.page?.status
-  const inFlight = IN_FLIGHT.has(status)
+  // From the server, which asks the worker: a read waiting out a usage limit leaves
+  // the page at its old status for hours and still replaces it when it lands.
+  // Not from the status alone, either: a page left "reading" by a run that died holds
+  // nothing, and judged by status it was locked — and polled — for good.
+  const inFlight = Boolean(data?.in_flight)
+  const locked = inFlight || status === 'skipped'
 
   // While the page is being read, look again until it is not. Nothing can be typed in
-  // the meantime, so replacing the boxes with the new reading loses nothing.
+  // the meantime, so replacing the boxes with the new reading loses nothing. An
+  // interval, not a timer re-armed by each answer: one failed look (a restart, a
+  // dropped connection) used to stop it for good, leaving everything disabled.
   useEffect(() => {
     if (!inFlight) return undefined
-    const timer = setTimeout(load, 1500)
-    return () => clearTimeout(timer)
-  }, [inFlight, data, load])
+    const timer = setInterval(load, 1500)
+    return () => clearInterval(timer)
+  }, [inFlight, load])
 
   const act = async (fn, message = '') => {
     setBusy(true)
@@ -184,7 +198,10 @@ export default function PageCheckPage() {
   }
 
   const readAgain = () => {
-    const corrections = data.regions.filter((r) => r.corrected).length
+    // Including ones still waiting on the pause: they are saved first, and then the
+    // new reading replaces them, so they count.
+    const corrections = data.regions.filter(
+      (r) => r.corrected || (drafts[r.id] ?? r.text) !== r.text).length
     const ok = window.confirm(
       'Read this page again?\n\nThis uses your Claude plan.'
       + (corrections
@@ -294,7 +311,13 @@ export default function PageCheckPage() {
 
           {inFlight && (
             <p className="mb-3 text-sm text-muted">
-              This page is being read. It can be corrected once that finishes.
+              This page is waiting to be read again, or being read. It can be corrected
+              once that finishes.
+            </p>
+          )}
+          {status === 'skipped' && (
+            <p className="mb-3 text-sm text-muted">
+              This page is marked as not part of the text. Put it back to correct it.
             </p>
           )}
 
@@ -310,7 +333,7 @@ export default function PageCheckPage() {
             regions.map((region, i) => (
               <RegionEditor key={region.id} index={i} region={region}
                             draft={drafts[region.id] ?? ''}
-                            disabled={inFlight || busy}
+                            disabled={locked || busy}
                             onChange={change} onRevert={revert} />
             ))
           )}

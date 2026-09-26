@@ -34,6 +34,7 @@ from .pageread import (
     CONFIDENCE_LEVELS, GLUE_KINDS, GLUE_NONE, JOIN_KINDS, KIND_BODY, REGION_KINDS,
     PageMeta, PageRead, Region, from_pixels, mark_furniture, validate,
 )
+from .spend import Spend
 
 # What the model is asked to produce. JSON, for the reason in the module docstring.
 PAGE_SYSTEM_PROMPT = """\
@@ -301,7 +302,7 @@ def parse_page_response(raw: str, *, width: int = 0, height: int = 0) -> PageRea
 
 
 def read_page(translator, image_path: str | Path, *, width: int = 0, height: int = 0,
-              hint: str = "", hooks=None) -> PageRead:
+              hint: str = "", hooks=None, spend: Spend | None = None) -> PageRead:
     """Read one page image. Blocking — always called via ``run_in_threadpool``.
 
     The ``Read`` tool is scoped to the image's own folder, so a call that can open a
@@ -324,6 +325,11 @@ def read_page(translator, image_path: str | Path, *, width: int = 0, height: int
         cwd=folder,
         add_dirs=[folder],
     )
+    # Recorded the moment the call returns, before anything can fail: an answer with
+    # no usable JSON raises below, and the call is billed all the same. Owned by the
+    # caller so it survives that exception — see `morning/spend.py`.
+    if spend is not None:
+        spend.add(usage, cost)
 
     page = parse_page_response(raw, width=width, height=height)
     page.usage = usage

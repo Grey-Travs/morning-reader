@@ -169,8 +169,8 @@ describe('correcting', () => {
   it('cannot be typed into while the page is being read, and looks again until it is done',
     async () => {
       api.page
-        .mockResolvedValueOnce(payload({}, { status: 'reading' }))
-        .mockResolvedValue(payload({}, { status: 'ok' }))
+        .mockResolvedValueOnce(payload({ in_flight: true }, { status: 'reading' }))
+        .mockResolvedValue(payload({ in_flight: false }, { status: 'ok' }))
       show()
 
       const boxes = await screen.findAllByRole('textbox', { name: /Region/ })
@@ -180,6 +180,80 @@ describe('correcting', () => {
       await waitFor(() => expect(screen.getAllByRole('textbox', { name: /Region/ })[0])
         .toBeEnabled(), { timeout: 3000 })
     })
+
+  it('locks a page waiting out a usage limit, whatever its status says', async () => {
+    // The read is put back to wait for the limit and the page rests at its old status
+    // for hours. Judged by status, the boxes opened and the read later replaced what
+    // was typed.
+    api.page.mockResolvedValue(payload({ in_flight: true }, { status: 'needs-check' }))
+    show()
+
+    expect((await screen.findAllByRole('textbox', { name: /Region/ }))[0]).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Read again' })).toBeDisabled()
+  })
+
+  it('keeps looking after one failed look, rather than staying locked for good',
+    async () => {
+      api.page
+        .mockResolvedValueOnce(payload({ in_flight: true }, { status: 'reading' }))
+        .mockRejectedValueOnce(new Error('the connection dropped'))
+        .mockResolvedValue(payload({ in_flight: false }, { status: 'ok' }))
+      show()
+
+      await waitFor(() => expect(screen.getAllByRole('textbox', { name: /Region/ })[0])
+        .toBeEnabled(), { timeout: 5000 })
+    })
+
+  it('does not lock a page a dead run left marked "reading"', async () => {
+    api.page.mockResolvedValue(payload({ in_flight: false }, { status: 'reading' }))
+    show()
+
+    expect((await screen.findAllByRole('textbox', { name: /Region/ }))[0]).toBeEnabled()
+  })
+
+  it('cannot be typed into on a page marked not text', async () => {
+    api.page.mockResolvedValue(payload({}, { status: 'skipped' }))
+    show()
+
+    expect((await screen.findAllByRole('textbox', { name: /Region/ }))[0]).toBeDisabled()
+    expect(screen.getByText(/Put it back to correct it/)).toBeInTheDocument()
+  })
+
+  it('never shows the page it just left under the next page’s address', async () => {
+    // "Looks right" on page 1, then the arrow before it answered: the reload of page 1
+    // landed after page 2 was showing, and typing there saved page 1's words onto
+    // page 2 and approved it.
+    let finishStatus
+    api.setPageStatus.mockReturnValue(new Promise((resolve) => { finishStatus = resolve }))
+    api.page.mockImplementation((pid, id) => Promise.resolve(id === 'p1'
+      ? payload()
+      : payload({ regions: [region('r0', '二ページ目')],
+                  position: { index: 1, total: 2, prev: 'p1', next: null } },
+                { id: 'p2', seq: 2 })))
+    const user = userEvent.setup()
+    show()
+
+    await user.click(await screen.findByRole('button', { name: 'Looks right' }))
+    await user.click(screen.getByRole('link', { name: 'Next page' }))
+    expect(await screen.findByDisplayValue('二ページ目')).toBeInTheDocument()
+    finishStatus({ status: 'edited' })
+
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.getByDisplayValue('二ページ目')).toBeInTheDocument()
+    expect(screen.queryByDisplayValue(FIRST)).not.toBeInTheDocument()
+  })
+
+  it('counts a correction still waiting to save before reading again', async () => {
+    const user = userEvent.setup()
+    show()
+    const box = (await screen.findAllByRole('textbox', { name: /Region/ }))[1]
+
+    await user.type(box, 'X')
+    await user.click(screen.getByRole('button', { name: 'Read again' }))
+
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringMatching(/1 correction on this page will be replaced/))
+  })
 
   it('says a built novel needs building again to use a correction', async () => {
     api.page.mockResolvedValue(payload({

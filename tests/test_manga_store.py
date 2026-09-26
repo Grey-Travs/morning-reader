@@ -484,3 +484,76 @@ class TestIdenticalBubbles:
         read, note = pages_mod.effective_read(record)
         assert [r.text for r in read.in_order()] == [LATER, "え？", "え？"]
         assert note == ""
+
+
+# ---- English follows its words across a re-read -------------------------------
+# Lines are stored by region id, and ids are positions in the model's list. A re-read
+# that lists the same bubbles in another order used to hand each bubble its
+# neighbour's English. `carry_lines` moves each line onto the region that now says the
+# words it was translated from — the rule a saved reading order already follows.
+
+def _line(text: str, english: str, **extra) -> dict:
+    return {"english": english, "source_hash": region_hash(Region(
+        id="x", box=(0, 0, 0, 0), text=text)), **extra}
+
+
+class TestLinesFollowTheirWords:
+    def test_a_re_read_that_reshuffled_the_ids_moves_each_line_with_its_words(self):
+        record = page(1, regions=[region("r0", A, 0), region("r1", Q, 1)],
+                      lines={"r0": _line(Q, "No more."), "r1": _line(A, "Really?")})
+
+        assert pages_mod.carry_lines(record) == 2
+        assert record["lines"]["r0"]["english"] == "Really?"
+        assert record["lines"]["r1"]["english"] == "No more."
+        assert pages_mod.line_counts(record)["stale"] == 0
+
+    def test_a_line_already_on_its_words_is_left_alone(self):
+        record = page(1, regions=[region("r0", Q, 0)],
+                      lines={"r0": _line(Q, "No more.")})
+
+        assert pages_mod.carry_lines(record) == 0
+        assert record["lines"] == {"r0": _line(Q, "No more.")}
+
+    def test_a_human_s_english_travels_with_its_words(self):
+        """A re-translate never overwrites a human's line, so one left on the wrong
+        bubble stayed there for good."""
+        record = page(1, regions=[region("r0", LATER, 0), region("r1", Q, 1)],
+                      lines={"r0": _line(Q, "Enough.", english_source="user")})
+
+        pages_mod.carry_lines(record)
+
+        assert record["lines"] == {"r1": _line(Q, "Enough.", english_source="user")}
+
+    def test_a_line_whose_words_are_gone_stays_put_and_stale(self):
+        """Never forced onto words it was not translated from."""
+        record = page(1, regions=[region("r0", LATER, 0)],
+                      lines={"r0": _line(Q, "No more.")})
+
+        assert pages_mod.carry_lines(record) == 0
+        assert pages_mod.line_counts(record)["stale"] == 1
+
+    def test_a_line_that_rightfully_owns_an_id_beats_one_whose_words_are_gone(self):
+        record = page(1, regions=[region("r0", A, 0)],
+                      lines={"r0": _line(Q, "No more."), "r1": _line(A, "Really?")})
+
+        pages_mod.carry_lines(record)
+
+        assert record["lines"] == {"r0": _line(A, "Really?")}
+
+    def test_two_bubbles_saying_the_same_thing_each_keep_one_line(self):
+        record = page(1, regions=[region("r0", Q, 0), region("r1", Q, 1),
+                                  region("r2", A, 2)],
+                      lines={"r1": _line(Q, "No more."), "r2": _line(Q, "Enough."),
+                             "r0": _line(A, "Really?")})
+
+        pages_mod.carry_lines(record)
+
+        assert record["lines"]["r1"]["english"] == "No more."
+        assert record["lines"]["r2"]["english"] == "Really?"
+        assert record["lines"]["r0"]["english"] == "Enough."
+        assert pages_mod.line_counts(record)["stale"] == 0
+
+    def test_a_page_with_no_lines_is_untouched(self):
+        record = page(1)
+        assert pages_mod.carry_lines(record) == 0
+        assert "lines" not in record

@@ -336,16 +336,13 @@ def test_a_failed_page_can_be_read_again_and_the_error_is_cleared(
     assert _page(client, project, good)["status"] == pages_mod.STATUS_OK
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Suspected bug: when the model answers but the answer has no usable JSON, "
-    "ocr.read_page raises PageReadError after translator._call has already returned "
-    "its usage and cost, and read_page_task never credits them. The billed call "
-    "vanishes from pages.json totals. The manga path credits the same case through "
-    "tasks._credit_manifest, and the prose path through Spend."))
 def test_an_unusable_answer_is_still_counted_as_spent(client, project, reader):
     """Guards the spend record. The call was made and billed; only its answer was
     useless. Leaving it out of the totals makes a failing book look cheaper than it
-    was, and the owner cannot see what the failures are costing them."""
+    was, and the owner cannot see what the failures are costing them.
+
+    It was left out: `ocr.read_page` raised after `_call` had returned its usage and
+    cost, and nothing credited them. The manga and prose paths already did."""
     (page_id,) = _upload(client, project, 1)
     reader.plan = {_file(project, page_id): {"answer": UNUSABLE}}
 

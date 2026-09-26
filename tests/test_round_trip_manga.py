@@ -350,12 +350,6 @@ def test_a_scanned_manga_page_reaches_the_overlay_and_survives_a_rescan(client,
                        json={}).json()["queued"] == []
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Suspected bug: a line's English is keyed by region id, and ids come from the "
-    "position in the model's list (ocr._region_from). A re-read that lists the same "
-    "bubbles in another order puts other bubbles' English on them, marked stale, or "
-    "none at all, although no Japanese changed. effective_read already re-matches the "
-    "saved ORDER on the words for this reason; the lines are not re-matched."))
 def test_a_rescan_that_lists_the_bubbles_in_another_order_keeps_each_line_on_its_bubble(
         client, fake_model):
     """A model lists regions in whatever order it detects them, and a second read of
@@ -363,9 +357,11 @@ def test_a_rescan_that_lists_the_bubbles_in_another_order_keeps_each_line_on_its
     ``pageread.apply_text_order`` says so, and re-matches a human's saved order on the
     words for that reason.
 
-    Lines are not re-matched, so after such a re-scan a bubble shows another bubble's
-    English, flagged stale, or shows none. The only way back is to pay to translate
-    again a chapter whose Japanese never changed.
+    Lines were not re-matched — they are keyed by region id, and ids are list
+    positions — so after such a re-scan a bubble showed another bubble's English,
+    flagged stale, or none, and the only way back was to pay to translate again a
+    chapter whose Japanese never changed. ``pages.carry_lines`` moves each line to the
+    region that says its words.
     """
     pid, page_id = _new_manga(client)
     _read(client, pid)

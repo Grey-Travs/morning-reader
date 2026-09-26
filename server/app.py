@@ -685,6 +685,10 @@ def get_page(pid: str, page_id: str) -> dict:
         },
         "built_at": (doc.get("build") or {}).get("at"),
         "corrected_at": corrected_at or None,
+        # Whether a read of this page is still to come. From the job: a read waiting
+        # out a usage limit leaves the page at its old status, and anything typed
+        # before it lands would be replaced.
+        "in_flight": jobs.holds_page(pid, page),
     }
 
 
@@ -939,19 +943,27 @@ def correct_region(pid: str, page_id: str, region_id: str,
         page = pages_mod.find_page(doc, page_id)
         if page is None:
             raise HTTPException(404, "There is no page with that id in this project.")
-        if page.get("status") in (pages_mod.STATUS_QUEUED, pages_mod.STATUS_RUNNING):
-            raise HTTPException(409, "This page is being read. Wait for it to finish, "
-                                     "then correct it.")
+        # Asked of the JOB, not the status: a read waiting out a usage limit rests the
+        # page at its old status for hours and still replaces the page when it lands.
+        if jobs.holds_page(pid, page):
+            raise HTTPException(409, "This page is waiting to be read again. Wait for "
+                                     "that to finish, then correct it.")
         if not page.get("read"):
             raise HTTPException(400, "This page has not been read yet, so there is "
                                      "nothing on it to correct.")
         region = pages_mod.set_correction(page, region_id, req.text)
         if region is None:
             raise HTTPException(404, "There is no region with that id on this page.")
-        pages_mod.set_status(doc, page_id, pages_mod.STATUS_EDITED)
+        # Checked only when something was actually corrected: typing a character and
+        # deleting it again saves the model's own words, and that approved a page
+        # nobody had approved. And never out of "not text": fixing a typo on a cover
+        # page put it into the novel, to be translated and billed.
+        if region["corrected"] and page.get("status") != pages_mod.STATUS_SKIPPED:
+            pages_mod.set_status(doc, page_id, pages_mod.STATUS_EDITED)
         page["order_check"] = pages_mod.order_check(page)
         _read, note = pages_mod.effective_read(page)
-    return {"region": region, "status": pages_mod.STATUS_EDITED, "note": note,
+        status = page.get("status")
+    return {"region": region, "status": status, "note": note,
             "text": pages_mod.page_text(page),
             "corrections": len(pages_mod.corrections_of(page))}
 
@@ -980,7 +992,8 @@ def propose_joins(pid: str) -> dict:
                   if p.get("status") != pages_mod.STATUS_SKIPPED and p.get("read")]
         for previous, following in zip(usable, usable[1:]):
             join = propose_join(pages_mod.page_text(previous),
-                                pages_mod.page_text(following), previous, following)
+                                pages_mod.page_text(following), previous, following,
+                                heading_of=pages_mod.page_heading)
             if pages_mod.set_join(following, join.kind, glue=join.glue,
                                   reason=join.reason):
                 proposed += 1
@@ -1000,7 +1013,7 @@ def _build_manga_chapters(pid: str, doc: dict) -> dict:
     so adding a seam near the end of a volume does not offer to re-bill the chapters
     before it.
     """
-    built = assemble_spans(doc.get("pages") or [])
+    built = assemble_spans(doc.get("pages") or [], heading_of=pages_mod.page_heading)
     if not built.spans:
         raise HTTPException(400, "There are no pages to build chapters from yet.")
 
@@ -1050,7 +1063,8 @@ def build_from_pages(pid: str) -> dict:
         raise HTTPException(400, "No pages are ready yet. Read them first, and check "
                                  "any the reader was unsure about.")
 
-    built = assemble(usable, text_of=pages_mod.page_text)
+    built = assemble(usable, text_of=pages_mod.page_text,
+                     heading_of=pages_mod.page_heading)
     if not built.chapters:
         raise HTTPException(400, "Those pages produced no text to build from.")
 
@@ -1218,7 +1232,12 @@ def _manga_page_payload(page: dict) -> dict:
             "english_source": record.get("english_source", ""),
             "speaker": record.get("speaker", ""),
             "speaker_source": record.get("speaker_source", ""),
-            "translatable": region.kind in TRANSLATED_KINDS,
+            # The same test as `translatable_regions` and `collect_lines`. Without the
+            # text check, a region a human emptied — a line the reader invented out of
+            # a smudge — kept drawing its old English over the art, counted nowhere,
+            # and held the "reading order changed" banner up for good.
+            "translatable": region.kind in TRANSLATED_KINDS
+            and bool((region.text or "").strip()),
             # Both computed server-side so the reader's "N lines could not be placed"
             # banner and what it actually draws cannot disagree. The browser mirrors
             # `is_drawable`, and tests/test_geometry_parity.py pins the pair.

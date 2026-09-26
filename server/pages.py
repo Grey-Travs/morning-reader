@@ -36,8 +36,8 @@ from morning.atomic import (
 )
 from morning.images import ImageInfo
 from morning.pageread import (
-    FURNITURE_KINDS, GLUE_NONE, JOIN_KINDS, KIND_FURIGANA, PROSE_KINDS,
-    TRANSLATED_KINDS, apply_text_order, flatten,
+    FURNITURE_KINDS, GLUE_NONE, JOIN_KINDS, KIND_FURIGANA, KIND_HEADING, PROSE_KINDS,
+    TRANSLATED_KINDS, apply_text_order, flatten, furniture_kind,
     is_drawable, order_texts, page_from_dict, region_hash,
     # Aliased: this module defines its own `reorder` for the PAGE order, and a
     # bare import would be shadowed by it — silently sending a list of region
@@ -306,6 +306,15 @@ def page_text(page: dict) -> str:
     return flatten(read, kinds=PROSE_KINDS)
 
 
+def page_heading(page: dict) -> str:
+    """The chapter heading printed on this page, as corrected by a human — what the
+    page builder names, splits and opens chapters with."""
+    if not page.get("read"):
+        return ""
+    read, _note = effective_read(page)
+    return (read.meta.heading or "").strip()
+
+
 def page_chars(page: dict) -> int:
     return len(page_text(page))
 
@@ -449,11 +458,25 @@ def _apply_corrections(read, corrections: dict):
             lost += 1
             continue
         used.add(rid)
+    meta = read.meta
     for region in read.regions:
         if region.id in used:
-            region = replace(region, text=corrections[region.id]["to"])
+            corrected = corrections[region.id]["to"]
+            # The page's reported heading is the same words as its heading region, and
+            # it is what names the chapter, splits it, and opens it. Correcting the
+            # region left the misread title in all three; emptying one the reader
+            # invented still split a chapter there.
+            if (region.kind == KIND_HEADING and meta.heading
+                    and meta.heading.strip() == (region.text or "").strip()):
+                meta = replace(meta, heading=corrected.strip() or None)
+            # The furniture rule ran on what the MODEL read. A page number it misread
+            # as 一26一, corrected to —26—, would otherwise go into the novel as a
+            # paragraph. The rule only relabels shapes story text never has.
+            kind = (region.kind if region.kind in FURNITURE_KINDS
+                    else furniture_kind(corrected) or region.kind)
+            region = replace(region, text=corrected, kind=kind)
         regions.append(region)
-    return replace(read, regions=regions), lost
+    return replace(read, regions=regions, meta=meta), lost
 
 
 def effective_read(page: dict):
@@ -536,6 +559,58 @@ def set_order(page: dict, ids: list[str] | None) -> bool:
                      "source": "user", "at": now_iso()}
     page["order_check"] = order_check(page)
     return True
+
+
+def carry_lines(page: dict) -> int:
+    """After a re-read, move each translated line onto the region that now says its
+    words. Returns how many moved.
+
+    Lines are stored by region id, and ids are positions in the model's list — so a
+    re-read that lists the same bubbles in another order handed every bubble its
+    neighbour's English. Marked stale, so never passed off as right, but the chapter
+    had to be paid for again, and English a human typed sat on the wrong bubble for
+    good, since a re-translate never overwrites a human's line.
+
+    The same rule the saved reading order follows: match on the WORDS (the line's
+    ``source_hash``), prefer the id it already had, and never force a line onto words
+    it was not translated from. A line whose words are gone stays where it was, stale,
+    unless another line has rightfully claimed that id.
+    """
+    lines = page.get("lines")
+    if not isinstance(lines, dict) or not lines:
+        return 0
+    read, _note = effective_read(page)
+    by_id = {r.id: r for r in read.regions}
+    by_hash: dict[str, list[str]] = {}
+    for region in read.in_order():
+        by_hash.setdefault(region_hash(region), []).append(region.id)
+
+    def words(line) -> str:
+        return line.get("source_hash") if isinstance(line, dict) else ""
+
+    carried: dict = {}
+    waiting = []
+    for rid, line in lines.items():
+        region = by_id.get(rid)
+        if words(line) and region is not None and region_hash(region) == words(line):
+            carried[rid] = line
+        else:
+            waiting.append((rid, line))
+
+    moved = 0
+    stranded = []
+    for rid, line in waiting:
+        target = next((i for i in by_hash.get(words(line), []) if i not in carried),
+                      None) if words(line) else None
+        if target is None:
+            stranded.append((rid, line))
+            continue
+        carried[target] = line
+        moved += target != rid
+    for rid, line in stranded:
+        carried.setdefault(rid, line)
+    page["lines"] = carried
+    return moved
 
 
 def set_line(page: dict, region_id: str, **fields) -> dict:

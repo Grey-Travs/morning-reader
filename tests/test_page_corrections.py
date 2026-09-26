@@ -31,10 +31,12 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from morning.page_build import propose_join
 from morning.pageread import (
-    KIND_BODY, KIND_BUBBLE, KIND_PAGE_NUMBER, PageMeta, PageRead, Region, region_hash,
+    JOIN_CHAPTER, KIND_BODY, KIND_BUBBLE, KIND_HEADING, KIND_PAGE_NUMBER, PageMeta,
+    PageRead, Region, region_hash,
 )
-from server import jobs, pages as pages_mod, projects as pj
+from server import jobs, pages as pages_mod, projects as pj, tasks as task_mod
 from server.app import app
 from tests.test_images import jpeg
 
@@ -58,6 +60,7 @@ class FakeReader:
     notes: list = ["the bottom line is faint"]
     confidence = "medium"
     gate: threading.Event | None = None
+    fail = False
 
     def __init__(self, *_a, **_kw):
         pass
@@ -67,6 +70,8 @@ class FakeReader:
         FakeReader.calls.append({"user": user_text})
         if FakeReader.gate is not None:
             assert FakeReader.gate.wait(10), "the test never released the read"
+        if FakeReader.fail:
+            raise RuntimeError("the reader fell over")
         second, first = FakeReader.regions
         return json.dumps({
             "width": W, "height": H,
@@ -90,6 +95,7 @@ def fake_reader(monkeypatch):
     FakeReader.notes = ["the bottom line is faint"]
     FakeReader.confidence = "medium"
     FakeReader.gate = None
+    FakeReader.fail = False
     monkeypatch.setattr(jobs, "Translator", FakeReader)
     yield FakeReader
     if FakeReader.gate is not None:
@@ -260,15 +266,71 @@ class TestCorrecting:
         """Night Reader accepted it, and the read then landed on top and silently
         replaced the correction."""
         pid, page_id = read_page
-        for status in (pages_mod.STATUS_QUEUED, pages_mod.STATUS_RUNNING):
-            with pages_mod.mutate_pages(pid) as doc:
-                pages_mod.find_page(doc, page_id)["status"] = status
+        FakeReader.gate = threading.Event()
+        client.post(f"/api/projects/{pid}/pages/read",
+                    json={"ids": [page_id], "force": True})
+        _await_status(pid, page_id, pages_mod.STATUS_RUNNING)
 
-            response = _correct(client, pid, page_id, "r0", SECOND)
+        response = _correct(client, pid, page_id, "r0", SECOND)
 
-            assert response.status_code == 409
-            assert "being read" in response.json()["detail"]["title"]
-            assert pages_mod.corrections_of(_stored(pid, page_id)) == {}
+        assert response.status_code == 409
+        assert "read again" in response.json()["detail"]["title"]
+        assert client.get(f"/api/projects/{pid}/pages/{page_id}").json()["in_flight"]
+        FakeReader.gate.set()
+        _await_idle(client, pid)
+        assert pages_mod.corrections_of(_stored(pid, page_id)) == {}
+
+    def test_it_is_refused_while_a_read_waits_out_a_usage_limit(
+            self, client, read_page, monkeypatch):
+        """A read put back to wait for the limit to reset rests the page at its old
+        status — for hours — while the worker still holds it. Judged by status, the
+        boxes opened, the correction was accepted, and the read landed on it later."""
+        pid, page_id = read_page
+
+        class Waiting:
+            queued = {task_mod.queue_key(1, task_mod.TASK_READ_PAGE)}
+
+        monkeypatch.setattr(jobs, "active_job", lambda _pid: Waiting())
+        assert _stored(pid, page_id)["status"] == pages_mod.STATUS_NEEDS_CHECK
+
+        response = _correct(client, pid, page_id, "r0", SECOND)
+
+        assert response.status_code == 409
+        assert client.get(f"/api/projects/{pid}/pages/{page_id}").json()["in_flight"]
+
+    def test_a_page_left_reading_by_a_run_that_died_can_still_be_corrected(
+            self, client, read_page):
+        """No worker, so no read will ever land. Refusing would lock the page for good."""
+        pid, page_id = read_page
+        with pages_mod.mutate_pages(pid) as doc:
+            pages_mod.find_page(doc, page_id)["status"] = pages_mod.STATUS_RUNNING
+
+        assert _correct(client, pid, page_id, "r0", SECOND).status_code == 200
+        assert not client.get(
+            f"/api/projects/{pid}/pages/{page_id}").json()["in_flight"]
+
+    def test_a_page_marked_not_text_stays_not_text(self, client, read_page):
+        """Fixing a typo on a cover page put it into the novel, to be translated and
+        billed."""
+        pid, page_id = read_page
+        client.post(f"/api/projects/{pid}/pages/{page_id}/status",
+                    json={"status": "skipped"})
+
+        body = _correct(client, pid, page_id, "r0", SECOND).json()
+
+        assert body["status"] == pages_mod.STATUS_SKIPPED
+        assert _stored(pid, page_id)["status"] == pages_mod.STATUS_SKIPPED
+
+    def test_typing_and_deleting_again_does_not_approve_the_page(
+            self, client, read_page):
+        """The autosave then sends the model's own words. That marked an unchecked page
+        checked — into the novel — with nobody pressing "Looks right"."""
+        pid, page_id = read_page
+
+        body = _correct(client, pid, page_id, "r0", MISREAD).json()
+
+        assert body["status"] == pages_mod.STATUS_NEEDS_CHECK
+        assert _stored(pid, page_id)["status"] == pages_mod.STATUS_NEEDS_CHECK
 
     def test_an_unread_page_has_nothing_to_correct(self, client):
         pid = _project()
@@ -347,6 +409,69 @@ class TestWhatACorrectionReaches:
         assert pages_mod.line_counts(_stored(pid, page_id))["stale"] == 1
 
 
+class TestACorrectedHeading:
+    """The page's reported heading names the chapter, splits it and opens it. It is the
+    same words as the heading region, and correcting the region used to leave the
+    misread title in all three."""
+
+    MISREAD_TITLE = "第一話　朝の訳"
+    TITLE = "第一話　朝の駅"
+
+    def _add_heading(self, pid, page_id, text):
+        with pages_mod.mutate_pages(pid) as doc:
+            page = pages_mod.find_page(doc, page_id)
+            page["read"]["regions"].append(Region(
+                id="r3", box=(0.1, 0.01, 0.8, 0.05), text=text, kind=KIND_HEADING,
+                order=-1).to_dict())
+            page["read"]["meta"]["heading"] = text
+
+    def test_the_chapter_is_named_and_opened_with_the_corrected_title(
+            self, client, read_page):
+        pid, page_id = read_page
+        self._add_heading(pid, page_id, self.MISREAD_TITLE)
+        _correct(client, pid, page_id, "r3", self.TITLE)
+
+        assert client.post(f"/api/projects/{pid}/pages/build").status_code == 200
+
+        (chapter,) = pj.load_source(pid)
+        assert chapter.title == self.TITLE
+        assert chapter.paragraphs[0] == self.TITLE
+        assert not any(self.MISREAD_TITLE in p for p in chapter.paragraphs)
+
+    def test_emptying_an_invented_heading_no_longer_splits_the_chapter(self):
+        first = _page([_region("r0", FIRST, 0)], seq=1)
+        second = _page([_region("r0", "第二話", 0, KIND_HEADING),
+                        _region("r1", SECOND, 1)], seq=2)
+        second["read"]["meta"]["heading"] = "第二話"
+        assert propose_join(FIRST, SECOND, first, second,
+                            heading_of=pages_mod.page_heading).kind == JOIN_CHAPTER
+
+        pages_mod.set_correction(second, "r0", "")
+
+        assert pages_mod.page_heading(second) == ""
+        assert propose_join(FIRST, SECOND, first, second,
+                            heading_of=pages_mod.page_heading).kind != JOIN_CHAPTER
+
+
+class TestAnEmptiedBubble:
+    def test_it_leaves_the_overlay_rather_than_drawing_its_old_english(self, client):
+        """Emptied, a line the reader invented from a smudge is no longer said — but
+        the reader kept drawing its old English over the art, counted nowhere, and
+        the "reading order changed" banner could never clear."""
+        pid = _project(pj.KIND_MANGA)
+        (page_id,) = _upload(client, pid)
+        _read(client, pid)
+        client.post(f"/api/projects/{pid}/pages/build")
+        with pages_mod.mutate_pages(pid) as doc:
+            page = pages_mod.find_page(doc, page_id)
+            pages_mod.set_line(page, "r0", english="She stood.", source_hash="old")
+
+        _correct(client, pid, page_id, "r0", "")
+
+        regions = client.get(f"/api/projects/{pid}/manga/1").json()["pages"][0]["regions"]
+        assert next(r for r in regions if r["id"] == "r0")["translatable"] is False
+
+
 # ---- reading again -----------------------------------------------------------------
 
 class TestReadingAgain:
@@ -402,6 +527,26 @@ class TestReadingAgain:
         stored = _stored(pid, second)
         assert stored["status"] == pages_mod.STATUS_SKIPPED
         assert stored["read"] is None
+
+    def test_a_skip_made_during_a_read_that_then_fails_stays_a_skip(self, client):
+        """The failure path wrote back the status the page was resting at BEFORE the
+        human's decision — "new" — and the next sweep billed the cover page."""
+        pid = _project()
+        (page_id,) = _upload(client, pid)
+        FakeReader.gate = threading.Event()
+        FakeReader.fail = True
+        client.post(f"/api/projects/{pid}/pages/read", json={})
+        _await_status(pid, page_id, pages_mod.STATUS_RUNNING)
+
+        client.post(f"/api/projects/{pid}/pages/{page_id}/status",
+                    json={"status": "skipped"})
+        FakeReader.gate.set()
+        _await_idle(client, pid)
+
+        assert _stored(pid, page_id)["status"] == pages_mod.STATUS_SKIPPED
+        client.post(f"/api/projects/{pid}/pages/read", json={})
+        _await_idle(client, pid)
+        assert len(FakeReader.calls) == 1, "and the next sweep leaves it alone"
 
     def test_a_page_skipped_while_being_read_stays_skipped(self, client):
         """The read is kept — it is paid for — but "not part of the text" stands."""
@@ -495,6 +640,16 @@ class TestTheStore:
         pages_mod.effective_read(page)
 
         assert page["read"]["regions"][0]["text"] == MISREAD
+
+    def test_a_page_number_corrected_into_shape_is_left_out_of_the_text(self):
+        """The furniture rule ran on the model's 一26一 and let it through as prose.
+        Corrected to what the page says, it is a page number and nothing else."""
+        page = _page([_region("r0", FIRST, 0), _region("r1", "一26一", 1)])
+        assert pages_mod.page_text(page) == f"{FIRST}\n\n一26一"
+
+        pages_mod.set_correction(page, "r1", "—26—")
+
+        assert pages_mod.page_text(page) == FIRST
 
     def test_a_correction_to_a_bubble_is_what_the_translator_is_given(self):
         page = _page([_region("r0", "なんで", 0, KIND_BUBBLE)])

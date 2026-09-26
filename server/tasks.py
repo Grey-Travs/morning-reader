@@ -291,10 +291,19 @@ def read_page_task(page: dict, ctx: TaskContext) -> dict:
         raise TaskRefused("that page's image file is missing")
 
     ctx.progress.check()
-    read = ocr.read_page(
-        ctx.translator, image,
-        width=int(page.get("width") or 0), height=int(page.get("height") or 0),
-        hint=str(page.get("hint") or ""), hooks=ctx.hooks)
+    spend = Spend()
+    try:
+        read = ocr.read_page(
+            ctx.translator, image,
+            width=int(page.get("width") or 0), height=int(page.get("height") or 0),
+            hint=str(page.get("hint") or ""), hooks=ctx.hooks, spend=spend)
+    except BaseException:
+        # The call was billed and its answer was useless — or it was stopped after
+        # answering. Either way it cost money, and `_apply_page_result`, the only
+        # other writer of these totals, never runs on this path. The manga path and
+        # the prose path already credit it; pages were the odd one out.
+        _credit_manifest(ctx.pid, spend)
+        raise
 
     attempts = int(((page.get("ocr") or {}).get("attempts") or 0)) + 1
     return {

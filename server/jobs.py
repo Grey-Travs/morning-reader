@@ -422,6 +422,9 @@ def _apply_page_result(pid: str, page_id: str, fields: dict) -> dict:
         if record.get("status") == pages_mod.STATUS_SKIPPED:
             fields = {k: v for k, v in fields.items() if k != "status"}
         record.update(fields)
+        # The new read can list the same bubbles in another order, which hands them new
+        # ids. The English follows its words, as a saved reading order already does.
+        pages_mod.carry_lines(record)
         # Recomputed HERE, on every read, because this is the only moment the regions
         # change. It used to be written only when a human set an order — so on a page
         # nobody had reordered it was absent, and the pages grid's "reads
@@ -437,9 +440,56 @@ def _apply_page_result(pid: str, page_id: str, fields: dict) -> dict:
         return dict(record)
 
 
-def _set_page_status(pid: str, page_id: str, status: str, **fields) -> None:
+def _claim_page(pid: str, page_id: str) -> dict | None:
+    """Mark a page "reading" and return a copy of it — or None, touching nothing, when a
+    human has said it is not text. One lock for both, so a skip cannot land between
+    the look and the mark."""
     with pages_mod.mutate_pages(pid) as doc:
+        page = pages_mod.find_page(doc, page_id)
+        if page is None or page.get("status") == pages_mod.STATUS_SKIPPED:
+            return None
+        pages_mod.set_status(doc, page_id, pages_mod.STATUS_RUNNING)
+        return dict(page)
+
+
+def _set_page_status(pid: str, page_id: str, status: str, **fields) -> None:
+    """Where stopped, refused, rate-limited or failed work leaves a page.
+
+    Only over the worker's own marks. A human can decide about a page while it is being
+    read — "not text", "looks right", "put it back" — and writing the status the page
+    was resting at BEFORE that decision undid it: a skipped cover came back as "new"
+    and the next sweep billed it, or straight away after a rate limit. Their decision
+    stands; a failure still leaves its reason, except on a page they said is not text.
+    """
+    with pages_mod.mutate_pages(pid) as doc:
+        page = pages_mod.find_page(doc, page_id)
+        if page is None:
+            return
+        current = page.get("status")
+        if current not in (pages_mod.STATUS_QUEUED, pages_mod.STATUS_RUNNING):
+            if current != pages_mod.STATUS_SKIPPED and fields:
+                page.update(fields)
+            return
         pages_mod.set_status(doc, page_id, status, **fields)
+
+
+def holds_page(pid: str, page: dict) -> bool:
+    """Whether this project's worker still has a read of this page to do.
+
+    From the JOB, not from the page's status: a read put back to wait out a usage
+    limit rests the page at its old status for hours while the worker still holds it,
+    and a human's "put it back" mid-read rewrites the status too. Either way the read
+    lands later and replaces anything typed in between. A queued or reading status
+    with no worker at all is left over from a run that died, and holds nothing.
+    """
+    job = active_job(pid)
+    if job is None:
+        return False
+    if task_mod.queue_key(int(page.get("seq") or 0), task_mod.TASK_READ_PAGE) \
+            in job.queued:
+        return True
+    # The read route marks the page queued a moment before it hands the job the item.
+    return page.get("status") in (pages_mod.STATUS_QUEUED, pages_mod.STATUS_RUNNING)
 
 
 def _set_chapter_status(pid: str, index: str, status: str, **fields) -> None:
@@ -620,17 +670,23 @@ async def _run_manifest_item(job: Job, context, cfg: Config, index: int, force: 
 
     record_id = store.identify(record)
     label = store.label(record, index)
-    # Skipped by a human after it was queued. Reading it anyway spent the allowance on
-    # a page they had just said was not text, and the result then overwrote the skip.
-    # Checked here, at the last moment before anything is billed.
-    if store is PAGE_STORE and record.get("status") == pages_mod.STATUS_SKIPPED:
-        job.queued.discard(key)
-        job.current = None
-        job.publish({"type": "item", "index": index, "kind": kind,
-                     store.id_field: record_id, "title": label,
-                     "status": pages_mod.STATUS_SKIPPED, "refused": True,
-                     "error": "skipped before it was read"})
-        return strikes, "continue"
+    if store is PAGE_STORE:
+        # Claimed under the lock: skipped or not, and "reading" if not, in ONE write.
+        # Skipped by a human after it was queued, reading it anyway spent the allowance
+        # on a page they had just said was not text — and checked on an unlocked
+        # snapshot, a skip landing between the check and the mark was overwritten.
+        # The claimed copy is also the freshest one, so a note saved while the page
+        # waited in the queue is the one the reader gets.
+        claimed = _claim_page(job.pid, record_id)
+        if claimed is None:
+            job.queued.discard(key)
+            job.current = None
+            job.publish({"type": "item", "index": index, "kind": kind,
+                         store.id_field: record_id, "title": label,
+                         "status": pages_mod.STATUS_SKIPPED, "refused": True,
+                         "error": "skipped before it was read"})
+            return strikes, "continue"
+        record = claimed
     # NOT record["status"] — that already reads "queued", because this item was marked
     # when the work was accepted. Restoring it would leave it queued forever.
     resting = store.resting(record)
@@ -642,7 +698,8 @@ async def _run_manifest_item(job: Job, context, cfg: Config, index: int, force: 
     progress, flush = _build_progress(job, loop)
     context.progress = progress
     context.hooks = _build_stream_hooks(job, loop)
-    store.set_status(job.pid, record_id, store.running)
+    if store is not PAGE_STORE:
+        store.set_status(job.pid, record_id, store.running)
     job.publish({"type": "start", "index": index, "title": label, "kind": kind,
                  "label": task_mod.describe(kind, index), store.id_field: record_id,
                  "billed": kind in task_mod.BILLED_TASK_KINDS,

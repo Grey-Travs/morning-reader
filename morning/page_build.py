@@ -111,11 +111,13 @@ def _page_meta(page: dict) -> dict:
 
 
 def _heading_of(page: dict) -> str:
+    """The heading the model reported. The server passes its own ``heading_of`` —
+    the heading after a human's corrections — wherever it has one."""
     return str(_page_meta(page).get("heading") or "").strip()
 
 
 def propose_join(previous_text: str, following_text: str,
-                 previous: dict, following: dict) -> Join:
+                 previous: dict, following: dict, *, heading_of=None) -> Join:
     """How ``following`` continues from ``previous``.
 
     Ordered most-certain first. Each rule is a different KIND of evidence, so the
@@ -124,7 +126,7 @@ def propose_join(previous_text: str, following_text: str,
     """
     meta_prev = _page_meta(previous)
     meta_next = _page_meta(following)
-    heading = _heading_of(following)
+    heading = (heading_of or _heading_of)(following)
 
     # 1. A chapter heading printed on the page. The strongest evidence there is —
     #    the book itself is saying where the boundary falls.
@@ -201,7 +203,7 @@ class SpanAssembly:
     pages_used: int = 0
 
 
-def assemble_spans(pages: list[dict]) -> SpanAssembly:
+def assemble_spans(pages: list[dict], *, heading_of=None) -> SpanAssembly:
     """Group an ordered run of pages into manga chapters.
 
     The same seam vocabulary as :func:`assemble`, asked of the same field — a manga's
@@ -246,7 +248,7 @@ def assemble_spans(pages: list[dict]) -> SpanAssembly:
         if page.get("status") == "skipped":
             continue
         used += 1
-        heading = _heading_of(page)
+        heading = (heading_of or _heading_of)(page)
         kind = str(page.get("join_prev") or "")
 
         if kind == JOIN_GAP:
@@ -265,7 +267,7 @@ def assemble_spans(pages: list[dict]) -> SpanAssembly:
     return SpanAssembly(spans=spans, warnings=warnings, pages_used=used)
 
 
-def assemble(pages: list[dict], *, text_of) -> Assembly:
+def assemble(pages: list[dict], *, text_of, heading_of=None) -> Assembly:
     """Build chapters from an ordered run of pages.
 
     ``text_of`` turns one page into its prose — injected rather than imported so the
@@ -301,7 +303,7 @@ def assemble(pages: list[dict], *, text_of) -> Assembly:
             # The first page of a chapter. Its printed heading, if it has one, names
             # the chapter — and if that heading is also the first line of the text,
             # it is not repeated.
-            heading = _heading_of(page)
+            heading = (heading_of or _heading_of)(page)
             if heading:
                 title = heading
                 if not looks_like_heading(text.split("\n", 1)[0]):
@@ -321,7 +323,7 @@ def assemble(pages: list[dict], *, text_of) -> Assembly:
 
         if kind == JOIN_CHAPTER:
             flush()
-            heading = _heading_of(page)
+            heading = (heading_of or _heading_of)(page)
             if heading:
                 title = heading
                 if not looks_like_heading(text.split("\n", 1)[0]):
