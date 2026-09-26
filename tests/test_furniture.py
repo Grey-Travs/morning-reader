@@ -107,6 +107,17 @@ def test_marking_twice_changes_nothing_the_second_time():
     assert mark_furniture(regions) == 0
 
 
+def test_a_watermark_the_text_does_not_prove_goes_back_to_being_text():
+    """The label is this rule's to give, not the model's. A read stored while the page
+    prompt offered it could file a shop sign under it — and furniture is never
+    translated."""
+    regions = [region("r0", "ニコニコ生放送", KIND_WATERMARK),
+               region("r1", "somesite.com", KIND_WATERMARK)]
+
+    assert mark_furniture(regions) == 1
+    assert [r.kind for r in regions] == [KIND_BODY, KIND_WATERMARK]
+
+
 def test_a_region_already_filed_as_furniture_is_left_as_it_is():
     """A running head that happens to look like a page number stays a running head —
     both are furniture, and churning between them helps nobody."""

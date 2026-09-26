@@ -264,6 +264,34 @@ describe('correcting', () => {
 
     expect(await screen.findByText(/Build them again/)).toBeInTheDocument()
   })
+
+  it('still says so after a built correction is taken back', async () => {
+    // The novel was built holding the correction; with none left standing the warning
+    // used to vanish, and the book kept words the page no longer says.
+    api.page.mockResolvedValue(payload({
+      built_at: '2026-09-01T00:00:00+00:00', corrected_at: '2026-09-02T00:00:00+00:00',
+    }))
+    show()
+
+    expect(await screen.findByText(/Build them again/)).toBeInTheDocument()
+  })
+
+  it('stops "Looks right" when a waiting correction fails to save', async () => {
+    // It used to go on and approve the page with the typo, then the reload wiped the
+    // typed fix and the error with it.
+    api.correctRegion.mockRejectedValue(Object.assign(new Error('offline'),
+      { explained: { title: 'Morning Reader is not responding' } }))
+    const user = userEvent.setup()
+    show()
+    const box = (await screen.findAllByRole('textbox', { name: /Region/ }))[1]
+
+    await user.type(box, 'X')
+    await user.click(screen.getByRole('button', { name: 'Looks right' }))
+
+    await waitFor(() => expect(api.correctRegion).toHaveBeenCalled())
+    expect(api.setPageStatus).not.toHaveBeenCalled()
+    expect(screen.getAllByRole('textbox', { name: /Region/ })[1]).toHaveValue(`${MISREAD}X`)
+  })
 })
 
 describe('deciding about the page', () => {

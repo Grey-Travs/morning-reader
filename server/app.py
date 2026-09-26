@@ -666,7 +666,6 @@ def get_page(pid: str, page_id: str) -> dict:
             "original": correction["from"] if applied else region.text,
             "corrected": applied,
         })
-    corrected_at = max((c.get("at") or "" for c in corrections.values()), default="")
     return {
         "page": page,
         "kind": project.get("kind", pj.KIND_NOVEL),
@@ -684,7 +683,7 @@ def get_page(pid: str, page_id: str) -> dict:
                      if position + 1 < len(pages) else None),
         },
         "built_at": (doc.get("build") or {}).get("at"),
-        "corrected_at": corrected_at or None,
+        "corrected_at": page.get("corrections_at") or None,
         # Whether a read of this page is still to come. From the job: a read waiting
         # out a usage limit leaves the page at its old status, and anything typed
         # before it lands would be replaced.
@@ -965,7 +964,8 @@ def correct_region(pid: str, page_id: str, region_id: str,
         status = page.get("status")
     return {"region": region, "status": status, "note": note,
             "text": pages_mod.page_text(page),
-            "corrections": len(pages_mod.corrections_of(page))}
+            "corrections": len(pages_mod.corrections_of(page)),
+            "corrected_at": page.get("corrections_at")}
 
 
 @app.post("/api/projects/{pid}/pages/propose-joins")

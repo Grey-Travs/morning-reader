@@ -7,6 +7,8 @@ invented for these tests.
 
 from __future__ import annotations
 
+import pytest
+
 from morning.textsource import (
     decode_upload, looks_like_heading, make_chapter, split_text_into_chapters,
 )
@@ -46,6 +48,53 @@ def test_the_fold_decides_but_the_title_keeps_its_own_characters():
 def test_full_width_prose_is_still_prose():
     for line in ("１２時に駅で会った。", "３人は黙っていた。", "ＯＫ、わかった。"):
         assert not looks_like_heading(line), line
+
+
+# Every counter is also the start of ordinary words. Taken for a heading, the sentence
+# became a chapter title — the chapter split there, and the sentence left the prose,
+# never to be translated. Kanji numerals and the kind words did this before full-width
+# digits were folded; the fold only made it more common.
+STARTS_LIKE_A_HEADING = [
+    "３回目の告白も、やっぱり失敗に終わった。",
+    "三回目の告白も、やっぱり失敗に終わった",
+    "一部の人は怒っていた",
+    "１部屋しかない",
+    "２回戦の相手は、去年の優勝校だった。",
+    "１巻から読み直した",
+    "序章から読み直した。",
+    "外伝的な話だ",
+    "第３回目の会議は、荒れに荒れた。",     # 第 and all: it ends in a full stop
+]
+
+
+@pytest.mark.parametrize("line", STARTS_LIKE_A_HEADING)
+def test_a_sentence_that_merely_starts_like_a_heading_is_prose(line):
+    assert not looks_like_heading(line)
+
+
+def test_heading_mode_keeps_such_a_sentence_in_its_chapter():
+    text = f"第1話\n\n{JA_A}\n\n三回目の告白も、やっぱり失敗に終わった\n\n{JA_B}"
+    (chapter,) = split_text_into_chapters(text, mode="heading")
+
+    assert chapter.paragraphs == [JA_A, "三回目の告白も、やっぱり失敗に終わった", JA_B]
+
+
+def test_separator_mode_does_not_take_such_a_sentence_for_a_title():
+    """The heading test runs BEFORE the "ends like a sentence" guard, so a block
+    opening with this line lost it into the title, full stop and all."""
+    text = f"２回戦の相手は、去年の優勝校だった。\n{JA_A}\n\n---\n\n{JA_B}"
+    first = split_text_into_chapters(text, mode="separator")[0]
+
+    assert first.paragraphs[0].startswith("２回戦の相手は")
+
+
+@pytest.mark.parametrize("heading", [
+    "第5話　なんで？",          # a title may end in a question or exclamation mark
+    "第3話「行くぞ」",
+    "プロローグ　始まり",
+])
+def test_headings_with_a_title_after_them_still_count(heading):
+    assert looks_like_heading(heading)
 
 
 def test_japanese_kind_words_are_recognised():

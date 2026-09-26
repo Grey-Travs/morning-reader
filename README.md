@@ -82,7 +82,13 @@ has no chapters until its pages have been read. The pages screen is then the wor
    again unless you select it.
 3. **Check the ones it was unsure about.** They are *excluded from the build* until
    you look. Building with them would put un-reviewed transcription into the novel,
-   which is the same mistake as reading an unaccepted translation.
+   which is the same mistake as reading an unaccepted translation. **Check it** opens
+   the page beside its photograph — Night Reader's page editor, carried: what the
+   reader read, region by region in reading order, *why* it was unsure, and a box to
+   correct each region. A correction saves itself after a pause (and is saved, not
+   dropped, if you move on first), marks the page checked, and is what the book is
+   built from. **Read again** takes a note for the reader ("the bottom two lines are
+   cut off"), and asks first, because a new reading replaces your corrections.
 4. **Fix the seams.** How each page follows the one before it — same sentence, new
    paragraph, new chapter, or *a page is missing*. The app proposes; you correct; a
    seam you decided is marked `user` and a later re-read never silently reverts it.
@@ -141,7 +147,13 @@ scanned novel — and then the paths diverge:
 **Anything a human decided is a SIBLING of `read`, never a key inside it.**
 `jobs._apply_page_result` merges a finished read with `record.update(fields)`, and
 those fields carry the whole new `read` — so anything stored inside it is destroyed by
-the next re-read. The corrected order and the English are therefore siblings.
+the next re-read. The corrected order, the English and corrected Japanese are therefore
+siblings. A correction (`corrections[region_id] = {from, to}`) applies only while the
+region still says what the model read, and after the saved order is matched — so fixing
+a typo never makes a human's reading order stop matching. While the worker still holds
+a read of the page (asked of the job, not the status: a read waiting out a usage limit
+rests the page at its old status for hours) corrections are refused, because the read
+would land on top of them.
 
 **A line is fresh only while its Japanese is unchanged.** `region_hash` is the per-line
 analogue of `source_hash`: text and nothing else, so a nudged box or a relabelled kind
@@ -155,7 +167,10 @@ Region ids are *not* an identity — `ocr._region_from` assigns `r0..rn` from th
 list position and the prompt never asks for an id — so a saved reading order is stored
 as the region **texts** in their order. That survives a re-read that renumbered
 everything. When the page no longer says the same things the order is not forced on;
-the model's comes back and the reader says why.
+the model's comes back and the reader says why. The English follows the same rule: after
+a re-read, each translated line moves to the region that now says the words it was
+translated from, so a page read again in a different list order does not hand every
+bubble its neighbour's English.
 
 ## Running it
 
@@ -172,8 +187,8 @@ developing; a reload would kill an in-flight job, so it is off by default).
 ## Tests
 
 ``bash
-.venv\Scripts\python.exe -m pytest tests/ -q     # 1246 tests
-cd web && npm test                                # 99 tests
+.venv\Scripts\python.exe -m pytest tests/ -q     # 1461 tests
+cd web && npm test                                # 150 tests
 ``
 
 **No test makes a real model call.** The SDK's `query` is replaced by a fake async

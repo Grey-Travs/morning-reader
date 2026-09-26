@@ -41,28 +41,48 @@ _KANJI_DIGITS = "〇一二三四五六七八九十百千"
 # 화 in script, because Korean writes that one counter in Hangul. Everything that
 # consumes a heading downstream is arithmetic over positions and numbers, so it
 # transfers untouched.
+# What may follow a counter or a kind word in a heading: the end of the line, a space,
+# or a separator. Without it every counter was also the start of ordinary words —
+# 三回目の告白も…, 一部の人は…, 二回戦の相手は…, 序章から読み直した… — and each
+# became a chapter title: the chapter split there, and the sentence left the prose
+# (titles are context for the translator, never translated), so it vanished from the
+# English with no error.
+_ENDS_HEADING_WORD = r"(?=$|[\s:：.\-–—「『（(【・])"
+
 _HEADING_RE = re.compile(
     r"^\s*(?:"
-    r"(?:chapter|ch\.?|episode|ep\.?|part|vol\.?|volume)\s*\d+"   # Chapter 3 / Ep. 3
-    rf"|第?\s*[0-9{_KANJI_DIGITS}]{{1,6}}\s*[話章巻部回]"  # 第3話 / 3話 / 第三章 / 5回
-    r"|プロローグ|エピローグ"              # プロローグ / エピローグ
-    r"|序章|終章|外伝|間章|閉幕"           # 序章 / 終章 / 外伝 / 間章 / 閉幕
-    r"|prologue|epilogue|interlude"
+    r"(?:chapter|ch\.?|episode|ep\.?|part|vol\.?|volume)\s*\d+\b"  # Chapter 3 / Ep. 3
+    rf"|第?\s*[0-9{_KANJI_DIGITS}]{{1,6}}\s*[話章巻部回]{_ENDS_HEADING_WORD}"
+    #                                  第3話 / 3話 / 第三章 / 5回, but not 三回目の…
+    rf"|(?:プロローグ|エピローグ|序章|終章|外伝|間章|閉幕){_ENDS_HEADING_WORD}"
+    r"|(?:prologue|epilogue|interlude)\b"
     r")\s*[:：.\-–「]?\s*.*$",
     re.IGNORECASE,
 )
 
+# A heading does not end in a full stop; a sentence that merely starts like one does —
+# 第三回目の会議は、荒れに荒れた。 Question and exclamation marks are left alone, because
+# a chapter title can end in one (第5話　なんで？).
+_ENDS_WITH_FULL_STOP = re.compile(r"[。．.]\s*$")
+
 
 def _heading_match(line: str):
-    """``_HEADING_RE`` against the line folded to plain width.
+    """``_HEADING_RE`` against the line folded to plain width, or None.
 
     Japanese typesetting numbers chapters in full-width digits as often as in ASCII —
     第１２話 is as ordinary as 第12話 — and the class above spells out ``0-9``. Without
     the fold a whole file numbered that way is one chapter, its headings translated as
     prose, with no error. NFKC is for the DECISION only: the title keeps the author's
     own characters.
+
+    The two mistakes are not equal. A heading missed leaves one long chapter, visible
+    and fixable. A sentence taken for a heading leaves the prose and is never
+    translated. So the rule errs toward prose.
     """
-    return _HEADING_RE.match(unicodedata.normalize("NFKC", line))
+    folded = unicodedata.normalize("NFKC", line)
+    if _ENDS_WITH_FULL_STOP.search(folded):
+        return None
+    return _HEADING_RE.match(folded)
 
 
 # A line that ends the way a sentence ends. Titles do not: "第1話　朝の駅" and

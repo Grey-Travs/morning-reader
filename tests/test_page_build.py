@@ -217,8 +217,7 @@ def test_vertical_typesetting_quotes_pair_too():
 
 class TestIsAQuotationStillOpen:
     @pytest.mark.parametrize("text", [
-        "「あの時言ったじゃない", "『本の題", '"どこへ行くの', "「彼が『明日』と",
-        "〝今日は",
+        "「あの時言ったじゃない", "『本の題", "「彼が『明日』と", "〝今日は",
     ])
     def test_open(self, text):
         assert has_unclosed_quote(text)
@@ -229,6 +228,14 @@ class TestIsAQuotationStillOpen:
     ])
     def test_closed(self, text):
         assert not has_unclosed_quote(text)
+
+    def test_straight_quotes_are_not_counted(self):
+        """They cannot tell opening from closing. By parity, a page that opens by
+        CLOSING the speech carried over from the page before counts as open, and the
+        next page was welded onto it as the same sentence."""
+        carried = '"と呼ばれた男は、黙って頷いた。\n\n　それが、最後の会話だった。'
+        assert not has_unclosed_quote(carried)
+        assert _join(carried, "　三年後、僕は村に戻った。").kind == JOIN_PARAGRAPH
 
     def test_a_page_that_closes_old_speech_and_opens_new_speech_is_still_open(self):
         """Whole-page counting calls this balanced — one 「 and one 」 — and it is the

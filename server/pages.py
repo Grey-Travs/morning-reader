@@ -510,11 +510,17 @@ def set_correction(page: dict, region_id: str, text: str) -> dict | None:
         return None
     corrections = corrections_of(page)
     original = region.text or ""
+    had = corrections.get(region.id, {}).get("to")
     if text.strip() == original.strip():
         corrections.pop(region.id, None)
     else:
         corrections[region.id] = {"from": original, "to": text, "at": now_iso()}
     page["corrections"] = corrections
+    # When the page's words last changed by hand — taking a correction BACK included,
+    # since a built novel still holds it. The rebuild warning is judged by this, on
+    # the server's clock, not by whether a correction is still standing.
+    if corrections.get(region.id, {}).get("to") != had:
+        page["corrections_at"] = now_iso()
     return {"id": region.id, "text": corrections.get(region.id, {}).get("to", original),
             "original": original, "corrected": region.id in corrections}
 

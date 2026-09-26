@@ -276,10 +276,30 @@ def test_the_prompt_asks_for_pixels_and_forbids_inventing_text():
 
 
 def test_the_prompt_lists_every_region_kind_the_contract_knows():
-    from morning.pageread import REGION_KINDS
+    from morning.pageread import KIND_WATERMARK, REGION_KINDS
 
-    for kind in REGION_KINDS:
+    for kind in set(REGION_KINDS) - {KIND_WATERMARK}:
         assert kind in ocr.PAGE_SYSTEM_PROMPT, kind
+
+
+def test_the_reader_is_never_offered_the_watermark_label():
+    """Decided from the text alone (`pageread.furniture_kind`). Offered as "a site name
+    stamped on the art", a model can file a sign or a screen in the story under it, and
+    furniture is never translated — the line would silently vanish."""
+    from morning.pageread import KIND_WATERMARK
+
+    assert KIND_WATERMARK not in ocr.PAGE_SYSTEM_PROMPT
+    page = ocr.parse_page_response(_answer(regions=[
+        {"box": [0, 0, 100, 100], "text": "ニコニコ生放送", "kind": "watermark",
+         "order": 0}]), width=W, height=H)
+    assert page.regions[0].kind == "body"
+
+
+def test_a_real_web_address_is_still_a_watermark_whatever_it_was_labelled():
+    page = ocr.parse_page_response(_answer(regions=[
+        {"box": [0, 0, 100, 100], "text": "somesite.com", "kind": "sign",
+         "order": 0}]), width=W, height=H)
+    assert page.regions[0].kind == "watermark"
 
 
 # ---- the call ------------------------------------------------------------------------

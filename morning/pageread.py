@@ -584,6 +584,13 @@ def mark_furniture(regions: list[Region]) -> int:
     """
     changed = 0
     for region in regions:
+        # A `watermark` the text does not prove came from a model, not this rule — a
+        # read stored while the page prompt still offered the label. Story text filed
+        # there would never be translated, so it goes back to being text.
+        if region.kind == KIND_WATERMARK and furniture_kind(region.text) != KIND_WATERMARK:
+            region.kind = KIND_BODY
+            changed += 1
+            continue
         if region.kind in FURNITURE_KINDS:
             continue
         kind = furniture_kind(region.text)

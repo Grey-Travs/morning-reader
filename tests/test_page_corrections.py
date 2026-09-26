@@ -247,6 +247,22 @@ class TestCorrecting:
 
         assert pages_mod.corrections_of(_stored(pid, page_id)) == {}
 
+    def test_it_records_when_the_words_last_changed_by_hand(self, client, read_page):
+        """What the rebuild warning is judged by. Taking a correction back counts — a
+        built novel still holds it — and it is the server's clock, the one `built_at`
+        is on."""
+        pid, page_id = read_page
+        first = _correct(client, pid, page_id, "r0", SECOND).json()["corrected_at"]
+        time.sleep(0.01)
+        taken_back = _correct(client, pid, page_id, "r0", MISREAD).json()["corrected_at"]
+
+        assert first and taken_back and taken_back > first
+        body = client.get(f"/api/projects/{pid}/pages/{page_id}").json()
+        assert body["corrected_at"] == taken_back
+
+        _read(client, pid, [page_id], force=True)
+        assert _stored(pid, page_id)["corrections_at"] is None
+
     def test_the_page_list_counts_them(self, client, read_page):
         """So "Read again" can say, before anything is spent, what it will replace."""
         pid, page_id = read_page

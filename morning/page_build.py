@@ -74,8 +74,12 @@ def has_unclosed_quote(text: str) -> bool:
                 depth -= 1
         if depth > 0:
             return True
-    # Straight quotes do not pair, so parity is the only signal they give.
-    return text.count('"') % 2 == 1
+    # Straight quotes are not counted. They cannot tell opening from closing, so their
+    # only signal is parity — and parity calls a page that opens by closing speech
+    # carried from the page before "still open", welding two paragraphs across the
+    # break. That is the worse of the two mistakes here: a spurious break is visible,
+    # a missing one is not. Japanese speech is marked 「」, which is counted above.
+    return False
 
 
 def _first_char(text: str) -> str:

@@ -31,7 +31,8 @@ import re
 from pathlib import Path
 
 from .pageread import (
-    CONFIDENCE_LEVELS, GLUE_KINDS, GLUE_NONE, JOIN_KINDS, KIND_BODY, REGION_KINDS,
+    CONFIDENCE_LEVELS, GLUE_KINDS, GLUE_NONE, JOIN_KINDS, KIND_BODY, KIND_WATERMARK,
+    REGION_KINDS,
     PageMeta, PageRead, Region, from_pixels, mark_furniture, validate,
 )
 from .spend import Spend
@@ -66,7 +67,6 @@ should contain the text and not much else.
 - `note` — a footnote or margin gloss
 - `furigana` — a small reading printed beside or above a kanji
 - `page-number`, `running-head` — page furniture
-- `watermark` — a site name or web address stamped onto the art
 - `bubble`, `thought`, `narration`, `sfx`, `sign`, `aside` — comic text
 
 **Seams.** For every region after the first, say how it follows the previous one in
@@ -198,7 +198,10 @@ def _region_from(raw: dict, index: int, width: int, height: int) -> Region | Non
         # re-scanned at another resolution.
         box=from_pixels(x, y, w, h, width, height),
         text=text,
-        kind=kind if kind in REGION_KINDS else KIND_BODY,
+        # `watermark` is decided from the text alone (`pageread.furniture_kind`, run
+        # just after this), never taken from the model: filed there, a sign or a
+        # screen in the story would never be translated.
+        kind=kind if kind in REGION_KINDS and kind != KIND_WATERMARK else KIND_BODY,
         order=order,
         join_prev=join if join in JOIN_KINDS else "",
         join_glue=glue if glue in GLUE_KINDS else GLUE_NONE,

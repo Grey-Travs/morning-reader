@@ -113,10 +113,16 @@ export default function PageCheckPage() {
           ? { ...r, text: result.region.text, original: result.region.original,
               corrected: result.region.corrected }
           : r)),
-        corrected_at: new Date().toISOString(),
+        // The server's clock, like `built_at` it is compared with.
+        corrected_at: result.corrected_at,
       } : current))
+      return true
     } catch (err) {
       setError(err)
+      // Kept waiting rather than dropped, so leaving the page still sends it and the
+      // typed words stay in the box.
+      if (!pending.current[regionId]) pending.current[regionId] = { page: forPage, text }
+      return false
     }
   }, [pid, pageId])
 
@@ -128,7 +134,11 @@ export default function PageCheckPage() {
     pending.current = {}
     Object.values(timers.current).forEach(clearTimeout)
     timers.current = {}
-    await Promise.all(waiting.map(([rid, p]) => save(p.page, rid, p.text)))
+    const saved = await Promise.all(waiting.map(([rid, p]) => save(p.page, rid, p.text)))
+    // A correction that did not save STOPS whatever was pressed. "Looks right" went on
+    // to approve the page with the typo, and the reload wiped the typed fix and the
+    // error with it — the silent loss the flush exists to prevent.
+    if (saved.includes(false)) throw Object.assign(new Error('not saved'), { shown: true })
   }, [save])
 
   useEffect(() => () => {
@@ -191,7 +201,7 @@ export default function PageCheckPage() {
       await load()
       if (message) setNotice(message)
     } catch (err) {
-      setError(err)
+      if (!err.shown) setError(err)
     } finally {
       setBusy(false)
     }
@@ -338,18 +348,21 @@ export default function PageCheckPage() {
             ))
           )}
 
-          {corrected && (isManga ? (
+          {isManga && corrected && (
             <p className="mb-3 text-xs text-hint">
               Lines translated from words you corrected are marked out of date in the
               reader until they are translated again.
             </p>
-          ) : builtBefore && (
+          )}
+          {/* Whether or not a correction still stands: taking one back after a build
+              leaves the novel holding it just the same. */}
+          {!isManga && builtBefore && (
             <p className="mb-3 text-xs" style={{ color: 'var(--warn)' }}>
-              You corrected this page after the chapters were built. Build them again to
-              use it — chapters already translated from the old text will show as out of
-              date.
+              You changed this page&rsquo;s words after the chapters were built. Build
+              them again to use the change — chapters already translated from the old
+              text will show as out of date.
             </p>
-          ))}
+          )}
 
           <div className="mt-2 flex flex-wrap gap-2">
             {page.read && !inFlight && status !== 'edited' && status !== 'skipped' && (

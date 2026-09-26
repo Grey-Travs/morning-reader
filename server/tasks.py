@@ -320,6 +320,7 @@ def read_page_task(page: dict, ctx: TaskContext) -> dict:
         # page carrying any is read again. (A reading ORDER is different: it is matched
         # on the words and survives wherever the page still says the same things.)
         "corrections": {},
+        "corrections_at": None,
         "error": None,
         "ocr": {"at": pages.now_iso(), "attempts": attempts,
                 "confidence": read.meta.confidence,
