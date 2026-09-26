@@ -17,7 +17,11 @@ import { countLabel } from '../format'
 function Panel({ pid, page, panel, number, lines, onSave, busy, known }) {
   return (
     <div className="mt-3">
-      <p className="text-xs text-hint">Page {page.seq} · panel {number}</p>
+      {/* A line in no panel says so rather than borrowing a number. It used to take
+          its position on the page, which belonged to a different, real panel. */}
+      <p className="text-xs text-hint">
+        Page {page.seq}{number ? ` · panel ${number}` : ''}
+      </p>
       <ul className="mt-1 grid gap-2">
         {lines.map((line) => (
           <Line key={line.id} pid={pid} page={page} line={line} onSave={onSave}
@@ -186,7 +190,7 @@ export default function MangaScriptPage() {
             pid={pid}
             page={page}
             panel={group.panel}
-            number={group.panel || i + 1}
+            number={group.panel}
             lines={group.lines}
             busy={busy}
             known={known}

@@ -47,7 +47,7 @@ def clean_jobs():
 def quiet_console(monkeypatch):
     """Silence the terminal renderer.
 
-    It is exercised directly by its own test; letting every job test paint progress
+    It is exercised directly in tests/test_term.py; letting every job test paint progress
     bars makes pytest output unreadable and, on a cp1252 Windows console, can itself
     raise mid-assert.
     """

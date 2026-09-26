@@ -95,10 +95,14 @@ def truncate(text: str, width: int) -> str:
     """
     if visible_width(text) <= width:
         return text
+    # No room even for the ellipsis alongside a character. The budget below used to
+    # floor at one column, so a one-column slot came back two columns wide.
+    if width <= 1:
+        return "…" if width == 1 else ""
     out, used = [], 0
     for c in text:
         w = _char_width(c)
-        if used + w > max(1, width - 1):
+        if used + w > width - 1:
             break
         out.append(c)
         used += w
