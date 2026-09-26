@@ -45,6 +45,7 @@ function PageCard({ pid, page, selected, onToggle, onJoin, onStatus, onMove, bus
             : <span style={{ color: 'var(--warn)' }}>size unknown</span>}
           {page.regions > 0 && ` · ${countLabel(page.regions, 'region')}`}
           {page.chars > 0 && ` · ${page.chars} chars`}
+          {page.corrections > 0 && ` · ${countLabel(page.corrections, 'correction')}`}
         </div>
 
         {page.looks_reversed && page.order_source !== 'user' && (
@@ -57,7 +58,10 @@ function PageCard({ pid, page, selected, onToggle, onJoin, onStatus, onMove, bus
           <p className="mt-1 text-xs" style={{ color: 'var(--bad)' }}>{page.error}</p>
         )}
 
-        {page.seq > 1 && (
+        {/* By POSITION in the book, not by seq. Seq is upload order: after a reorder
+            the first card offered a seam to nothing, and the page with seq 1 — now
+            somewhere in the middle — offered none. */}
+        {!first && (
           <label className="mt-2 block">
             <span className="mb-1 block text-xs text-muted">
               Follows the page before it as
@@ -87,7 +91,17 @@ function PageCard({ pid, page, selected, onToggle, onJoin, onStatus, onMove, bus
           <button type="button" className="btn" disabled={busy || last}
                   aria-label={`Move page ${page.seq} later`}
                   onClick={() => onMove(page.id, 1)}>→</button>
-          {page.status === 'needs-check' && (
+          {page.read && (
+            <Link to={`/work/${pid}/pages/${page.id}`}
+                  className={`btn no-underline${page.status === 'needs-check'
+                    ? ' btn-primary' : ''}`}>
+              {page.status === 'needs-check' ? 'Check it' : 'Open'}
+            </Link>
+          )}
+          {/* A failed RE-read keeps the good reading it had before. Offered only on
+              "to check" pages, that page was stranded: out of the build, skipped by
+              the sweep because it has a read, and with nothing to press. */}
+          {(page.status === 'needs-check' || (page.status === 'failed' && page.read)) && (
             <button type="button" className="btn" disabled={busy}
                     onClick={() => onStatus(page.id, 'edited')}>
               Looks right
@@ -193,10 +207,18 @@ export default function PagesPage() {
       setNotice('Every page has been read already. Select some to read them again.')
       return
     }
+    // A new reading replaces a human's corrections, as it does in Night Reader. Said
+    // BEFORE anything is spent, rather than discovered after.
+    const corrected = (data?.pages || []).filter(
+      (p) => selected.has(p.id) && p.corrections > 0).length
     const ok = window.confirm(
       `Read ${countLabel(count, 'page')}?\n\n`
       + 'This uses your Claude plan. You can stop it at any time, and a page that has '
-      + 'already been read is never read again unless you select it.')
+      + 'already been read is never read again unless you select it.'
+      + (corrected
+        ? `\n\nYour corrections on ${countLabel(corrected, 'page')} will be replaced by `
+          + 'the new reading.'
+        : ''))
     if (!ok) return
     const result = await act(
       () => api.readPages(pid, ids.length ? { ids, force: true } : {}))
@@ -223,6 +245,7 @@ export default function PagesPage() {
   // precisely so the screen can branch.
   const isManga = data.kind === 'manga'
   const needChecking = (summary.by_status || {})['needs-check'] || 0
+  const firstToCheck = pages.find((p) => p.status === 'needs-check')
   const unread = pages.filter((p) => !p.read && p.status !== 'skipped').length
   // A novel builds from approved pages only; a manga builds from every page that is
   // not explicitly "not text", because its art is the content.
@@ -325,6 +348,12 @@ export default function PagesPage() {
                 + 'transcription into the novel is the same mistake as reading a '
                 + 'translation nobody accepted.'}
           </p>
+          {firstToCheck && (
+            <Link to={`/work/${pid}/pages/${firstToCheck.id}`}
+                  className="btn btn-primary mt-3 no-underline">
+              Check the first one
+            </Link>
+          )}
         </div>
       )}
 

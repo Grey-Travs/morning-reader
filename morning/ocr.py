@@ -77,6 +77,13 @@ reading order:
 Use `glue: "none"` for Japanese (it has no spaces between words) and `glue: "space"`
 only when the join is between words of a language that needs one.
 
+**The page's edges.** In `meta`, say how this page meets its neighbours:
+- `starts_mid_sentence` — the first text on the page continues a sentence begun on the
+  page before (no opening quotation mark, no indent, no fresh start)
+- `ends_mid_sentence` — the last text stops before its sentence is finished: no
+  closing punctuation, or a quotation such as 「 still open
+- `ends_mid_word` — the page breaks in the middle of a single word
+
 **Output.** A single JSON object and nothing else — no preamble, no code fence, no
 commentary:
 
@@ -180,7 +187,11 @@ def _region_from(raw: dict, index: int, width: int, height: int) -> Region | Non
         order = index
 
     return Region(
-        id=str(raw.get("id") or f"r{index}"),
+        # Always positional, never the model's own. The prompt does not ask for ids,
+        # and one it volunteers can repeat — two regions called "zz" make a translated
+        # line, a correction and a saved order all ambiguous about which bubble they
+        # mean.
+        id=f"r{index}",
         # The only sanctioned way in. A model answers in pixels of the image it saw,
         # and storing those makes every position wrong the moment the page is
         # re-scanned at another resolution.

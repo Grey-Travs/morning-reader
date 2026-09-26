@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -249,6 +249,66 @@ describe('seams', () => {
     await screen.findByText(/page-1\.jpg/)
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
   })
+
+  it('decides "first" by position in the book, not by upload number', async () => {
+    // Seq is upload order. After a reorder the first card offered a seam to nothing,
+    // and the page uploaded first — now second — offered none.
+    api.pages.mockResolvedValue(manifest([page(2), page(1)]))
+    show()
+
+    const uploadedFirst = (await screen.findByText('1. page-1.jpg')).closest('.card')
+    const nowFirst = screen.getByText('2. page-2.jpg').closest('.card')
+    expect(within(uploadedFirst).getByRole('combobox')).toBeInTheDocument()
+    expect(within(nowFirst).queryByRole('combobox')).not.toBeInTheDocument()
+  })
+})
+
+describe('checking a page against its photograph', () => {
+  it('links each read page to its check, and the banner to the first one to check',
+    async () => {
+      api.pages.mockResolvedValue(manifest([page(1), page(2, { status: 'needs-check' }),
+        page(3, { status: 'new', read: false })]))
+      show()
+
+      expect(await screen.findByRole('link', { name: 'Check it' }))
+        .toHaveAttribute('href', '/work/abc/pages/p2')
+      expect(screen.getByRole('link', { name: 'Open' }))
+        .toHaveAttribute('href', '/work/abc/pages/p1')
+      expect(screen.getByRole('link', { name: 'Check the first one' }))
+        .toHaveAttribute('href', '/work/abc/pages/p2')
+      expect(screen.getAllByRole('link', { name: /Check it|Open/ })).toHaveLength(2)
+    })
+
+  it('lets a failed re-read that kept its reading be accepted', async () => {
+    // A failed RE-read keeps the good reading from before. With "Looks right" only on
+    // pages to check, it was stranded: out of the build, skipped by the sweep because
+    // it has a read, and nothing to press.
+    api.pages.mockResolvedValue(manifest([
+      page(1, { status: 'failed', error: 'RuntimeError: boom' }),
+      page(2, { status: 'failed', read: false, regions: 0 }),
+    ]))
+    api.setPageStatus.mockResolvedValue({ ok: true })
+    show()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Looks right' }))
+
+    expect(screen.getAllByRole('button', { name: 'Looks right' })).toHaveLength(1)
+    expect(api.setPageStatus).toHaveBeenCalledWith('abc', 'p1', 'edited')
+  })
+
+  it('says a corrected page will lose its corrections before reading it again',
+    async () => {
+      api.pages.mockResolvedValue(manifest([page(1, { corrections: 2 }), page(2)]))
+      api.readPages.mockResolvedValue({ queued: [1], job_id: 'j1' })
+      show()
+
+      await userEvent.click(await screen.findByAltText('page-1.jpg'))
+      await userEvent.click(screen.getByRole('button', { name: /Read 1 page again/ }))
+
+      expect(window.confirm.mock.calls[0][0])
+        .toContain('Your corrections on 1 page will be replaced')
+      expect(screen.getByText(/2 corrections/)).toBeInTheDocument()
+    })
 })
 
 describe('uploading', () => {

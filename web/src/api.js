@@ -125,7 +125,13 @@ export const api = {
     return req(`/api/projects/${pid}/pages?label=${encodeURIComponent(label)}`,
       { method: 'POST', body: form })
   },
+  // `hint` rides WITH the request: a note saved separately first could land after the
+  // read had already started without it.
   readPages: (pid, body = {}) => req(`/api/projects/${pid}/pages/read`, json(body)),
+  // A human's correction of what one region says. Text equal to the model's reading
+  // takes the correction back.
+  correctRegion: (pid, pageId, regionId, text) =>
+    req(`/api/projects/${pid}/pages/${pageId}/regions/${regionId}`, json({ text })),
   reorderPages: (pid, ids) => req(`/api/projects/${pid}/pages/reorder`, json({ ids })),
   deletePages: (pid, ids) => req(`/api/projects/${pid}/pages/delete`, json({ ids })),
   setPageJoin: (pid, pageId, kind, glue = 'none') =>

@@ -9,6 +9,7 @@ const ActivityPage = lazy(() => import('./pages/ActivityPage'))
 const ReaderPage = lazy(() => import('./pages/ReaderPage'))
 const GlossaryPage = lazy(() => import('./pages/GlossaryPage'))
 const PagesPage = lazy(() => import('./pages/PagesPage'))
+const PageCheckPage = lazy(() => import('./pages/PageCheckPage'))
 const MangaReaderPage = lazy(() => import('./pages/MangaReaderPage'))
 const MangaScriptPage = lazy(() => import('./pages/MangaScriptPage'))
 
@@ -67,6 +68,7 @@ export default function App() {
           <Route path="/work/:pid/read/:index" element={<ReaderPage />} />
           <Route path="/work/:pid/glossary" element={<GlossaryPage />} />
           <Route path="/work/:pid/pages" element={<PagesPage />} />
+          <Route path="/work/:pid/pages/:pageId" element={<PageCheckPage />} />
           <Route path="/work/:pid/manga/:index" element={<MangaReaderPage />} />
           <Route path="/work/:pid/manga/:index/script" element={<MangaScriptPage />} />
           <Route path="*" element={<NotFound />} />

@@ -306,6 +306,11 @@ def read_page_task(page: dict, ctx: TaskContext) -> dict:
         # Cleared: whatever the note said, it has now been acted on, and leaving it
         # would send the same hint again on every later re-read.
         "hint": "",
+        # A new reading replaces a human's corrections, as it does in Night Reader —
+        # they were fixes to the OLD reading, and the page-check screen asks before a
+        # page carrying any is read again. (A reading ORDER is different: it is matched
+        # on the words and survives wherever the page still says the same things.)
+        "corrections": {},
         "error": None,
         "ocr": {"at": pages.now_iso(), "attempts": attempts,
                 "confidence": read.meta.confidence,

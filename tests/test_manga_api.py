@@ -582,19 +582,50 @@ class TestWhetherAChapterStillNeedsTranslating:
 
 
 class TestTheBackwardsPageWarning:
-    def test_a_read_writes_the_order_check(self, client, manga, fake_translator):
+    def test_a_read_writes_the_order_check(self, client, monkeypatch):
         """It was written only when a human set an order — so on a page nobody had
         reordered it was absent, and the pages grid's warning and
         `summary.reversed_pages` were both dead. That warning is the one thing in the
-        app that catches a page transcribed backwards."""
-        with pages_mod.mutate_pages(manga) as doc:
-            doc["pages"] = [_page(1, [])]
-            doc["pages"][0]["read"] = None
-            doc["pages"][0]["status"] = "new"
-            doc["pages"][0]["file"] = "page-0001.jpg"
+        app that catches a page transcribed backwards.
 
-        rows = client.get(f"/api/projects/{manga}/pages").json()["pages"]
-        assert "looks_reversed" in rows[0]
+        Through a real read this time: the version before only asserted the key was
+        in the row, which it always is, so it passed with the recompute deleted."""
+        import io
+        import json
+
+        from tests.test_images import jpeg
+
+        class LeftToRight:
+            """Reads four panels the way a Western page would: backwards, for manga."""
+
+            def __init__(self, *_a, **_kw):
+                pass
+
+            def _call(self, system_text, user_text, max_turns=1, hooks=None, *,
+                      tools=None, cwd=None, add_dirs=None):
+                boxes = [[80, 120, 640, 960], [880, 120, 640, 960],
+                         [80, 1320, 640, 960], [880, 1320, 640, 960]]
+                return json.dumps({
+                    "width": 1600, "height": 2400,
+                    "regions": [{"box": box, "text": text, "kind": "bubble",
+                                 "order": i}
+                                for i, (box, text) in enumerate(zip(boxes, "abcd"))],
+                    "meta": {"confidence": "high"},
+                }), {}, 0.0
+
+        monkeypatch.setattr(jobs, "Translator", LeftToRight)
+        pid = pj.create_project("scans", kind=pj.KIND_MANGA,
+                                ingest=pj.INGEST_IMAGES)["id"]
+        client.post(f"/api/projects/{pid}/pages",
+                    files=[("files", ("p.jpg", io.BytesIO(jpeg(1600, 2400)),
+                                      "image/jpeg"))])
+        client.post(f"/api/projects/{pid}/pages/read", json={})
+        _await_idle(client, pid)
+
+        rows = client.get(f"/api/projects/{pid}/pages").json()
+        assert rows["pages"][0]["read"] is True
+        assert rows["pages"][0]["looks_reversed"] is True
+        assert rows["summary"]["reversed_pages"] == 1
 
 
 # ---- seams are proposed between the pages that will actually be built ---------

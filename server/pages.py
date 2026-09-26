@@ -27,6 +27,7 @@ import json
 import re
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -294,11 +295,15 @@ def page_text(page: dict) -> str:
 
     The novel path. A manga keeps the regions; this is what makes a scanned novel
     indistinguishable from a pasted one by the time it reaches the pipeline.
+
+    From the EFFECTIVE read: a human's corrections and reading order are what the
+    novel is built from. It used the raw read, so a novel built after a human reordered
+    a page's columns came out in the model's order anyway.
     """
-    read = page.get("read")
-    if not read:
+    if not page.get("read"):
         return ""
-    return flatten(page_from_dict(read), kinds=PROSE_KINDS)
+    read, _note = effective_read(page)
+    return flatten(read, kinds=PROSE_KINDS)
 
 
 def page_chars(page: dict) -> int:
@@ -372,13 +377,14 @@ def set_status(doc: dict, page_id: str, status: str, **fields) -> dict | None:
 # the whole new PageRead. So anything stored INSIDE ``read`` is silently destroyed by
 # the next re-read, while a sibling survives untouched.
 #
-# That is why ``order`` (a human's corrected reading order) and ``lines`` (English the
-# owner paid for) are siblings. It also fixes a live bug: ``order_source: "user"``
-# stored inside ``read`` is wiped by a re-read today, which the region contract's own
-# docstring forbids.
+# That is why ``order`` (a human's corrected reading order), ``lines`` (English the
+# owner paid for) and ``corrections`` (Japanese a human fixed) are siblings. It also
+# fixes a live bug: ``order_source: "user"`` stored inside ``read`` is wiped by a
+# re-read today, which the region contract's own docstring forbids.
 
-def effective_read(page: dict):
-    """The page as it should actually be read, and a note when something was lost.
+def _ordered_read(page: dict):
+    """The model's read with the human's reading order applied — the words still as
+    the MODEL read them. What a saved order is stored against and matched on.
 
     A human's saved reading order is stored as the TEXTS in their order, not as region
     ids, because ids are not an identity — ``ocr._region_from`` assigns them from the
@@ -392,19 +398,102 @@ def effective_read(page: dict):
     says so by name.
     """
     read = page_from_dict(page.get("read") or {})
-    stored = page.get("order") or {}
+    # Guarded: a hand-edited or damaged manifest can hold anything here, and this is
+    # called by every screen that shows the page — one bad value was a 500 on all of
+    # them.
+    stored = page.get("order")
+    stored = stored if isinstance(stored, dict) else {}
     saved = stored.get("texts")
-    if not saved:
+    if not saved or not isinstance(saved, list):
         return read, ""
+    ids = stored.get("ids")
+    ids = ids if isinstance(ids, list) else []
     # Ids are passed as a HINT alongside the words: they disambiguate two bubbles
     # saying exactly the same thing, and are ignored the moment the text disagrees.
     # An order stored before ids were kept simply has none, and matches on words alone.
-    applied = apply_text_order(read, [str(t) for t in saved],
-                               [str(i) for i in (stored.get("ids") or [])])
+    applied = apply_text_order(read, [str(t) for t in saved], [str(i) for i in ids])
     if applied is None:
         return read, ("your reading order no longer applies — the words on this page "
                       "changed when it was read again")
     return applied, ""
+
+
+def corrections_of(page: dict) -> dict:
+    """A page's corrections, ``{region_id: {"from", "to", "at"}}``, or ``{}``."""
+    stored = page.get("corrections")
+    if not isinstance(stored, dict):
+        return {}
+    return {str(rid): c for rid, c in stored.items()
+            if isinstance(c, dict) and isinstance(c.get("to"), str)
+            and isinstance(c.get("from"), str)}
+
+
+def _apply_corrections(read, corrections: dict):
+    """``read`` with a human's corrected text put in, and how many could not be.
+
+    A correction replaces one region's text, and only while that region still says
+    what the model read when the human corrected it — ``from`` is kept for exactly
+    that check. Region ids are positions, not identities, so a correction whose words
+    no longer match is NOT applied: putting a human's fix onto text they never saw is
+    the same mistake a stale reading order would be.
+    """
+    if not corrections:
+        return read, 0
+    lost = 0
+    regions = []
+    used = set()
+    by_id = {r.id: r for r in read.regions}
+    for rid, correction in corrections.items():
+        region = by_id.get(rid)
+        if region is None or (region.text or "").strip() != correction["from"].strip():
+            lost += 1
+            continue
+        used.add(rid)
+    for region in read.regions:
+        if region.id in used:
+            region = replace(region, text=corrections[region.id]["to"])
+        regions.append(region)
+    return replace(read, regions=regions), lost
+
+
+def effective_read(page: dict):
+    """The page as it should actually be read, and a note when something was lost.
+
+    The model's read, in the human's reading order, with the human's corrections. In
+    THAT order: a saved reading order is matched on the words the model read, so
+    correcting a typo must not make the order stop matching and drop out.
+    """
+    read, note = _ordered_read(page)
+    read, lost = _apply_corrections(read, corrections_of(page))
+    if lost:
+        lost_note = (f"{lost} of your corrections no longer appl"
+                     f"{'ies' if lost == 1 else 'y'} — the words they corrected are "
+                     f"not on this page any more")
+        note = f"{note}; {lost_note}" if note else lost_note
+    return read, note
+
+
+def set_correction(page: dict, region_id: str, text: str) -> dict | None:
+    """Record a human's correction of one region's text, or remove it.
+
+    Returns the region as it now reads — ``{"id", "text", "original", "corrected"}``
+    — or None when the page has no such region. Text equal to what the model read
+    removes the correction rather than storing a no-op, which is also how a human
+    takes one back.
+    """
+    read, _note = _ordered_read(page)
+    region = next((r for r in read.regions if r.id == str(region_id)), None)
+    if region is None:
+        return None
+    corrections = corrections_of(page)
+    original = region.text or ""
+    if text.strip() == original.strip():
+        corrections.pop(region.id, None)
+    else:
+        corrections[region.id] = {"from": original, "to": text, "at": now_iso()}
+    page["corrections"] = corrections
+    return {"id": region.id, "text": corrections.get(region.id, {}).get("to", original),
+            "original": original, "corrected": region.id in corrections}
 
 
 def order_check(page: dict) -> dict:
@@ -433,7 +522,9 @@ def set_order(page: dict, ids: list[str] | None) -> bool:
         page["order"] = None
         page["order_check"] = order_check(page)
         return True
-    read, _ = effective_read(page)
+    # The MODEL's words, not the corrected ones: the order is matched against the
+    # read before corrections go in, so storing corrected text would never match.
+    read, _ = _ordered_read(page)
     try:
         reordered = reorder_regions(read, [str(i) for i in ids])
     except ValueError:
