@@ -36,6 +36,21 @@ def isolated_projects(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_error_log(tmp_path, monkeypatch):
+    """Point the traceback log at a scratch directory too.
+
+    Every test that exercises a failure path wrote its traceback into the repo's own
+    `logs/errors.log` — a quarter of a megabyte of test noise mixed into the file where
+    a real failure of the running app is looked for. The repo guard below cannot see
+    it: the folder already exists, so nothing NEW appears at the top level.
+    """
+    from server import errors
+
+    monkeypatch.setattr(errors, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(errors, "LOG_FILE", tmp_path / "logs" / "errors.log")
+
+
+@pytest.fixture(autouse=True)
 def clean_jobs():
     """No job may survive a test."""
     jobs_mod.reset_for_tests()
