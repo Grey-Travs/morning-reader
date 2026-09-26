@@ -277,9 +277,33 @@ def test_a_shift_jis_upload_is_decoded_rather_than_mangled(client):
 def test_a_manga_project_can_be_created(client):
     """Both kinds exist from day one. They share everything above the page-read
     contract and fork below it, so the discriminator has to be on the record now."""
-    created = _create(client, kind="manga")
+    response = client.post("/api/projects/scan", json={"title": "x", "kind": "manga"})
 
-    assert created["project"]["kind"] == "manga"
+    assert response.status_code == 200, response.text
+    assert response.json()["project"]["kind"] == "manga"
+
+
+def test_a_manga_cannot_be_pasted(client):
+    """Pasted, it would get a prose source and no pages: the manga routes read pages
+    and the prose routes refuse a manga, so the work could be neither translated nor
+    read. Said before anything else — even an empty paste gets THIS answer, because
+    fixing the text would not help."""
+    for text in (NOVEL, ""):
+        response = client.post("/api/projects/text",
+                               json={"title": "x", "text": text, "kind": "manga"})
+
+        assert response.status_code == 400
+        assert "page images" in response.json()["detail"]["title"]
+    assert client.get("/api/projects").json()["projects"] == []
+
+
+def test_a_manga_cannot_be_uploaded_as_a_txt(client):
+    response = client.post("/api/projects/upload", params={"kind": "manga"},
+                           files={"file": ("m.txt", NOVEL.encode("utf-8"), "text/plain")})
+
+    assert response.status_code == 400
+    assert "page images" in response.json()["detail"]["title"]
+    assert client.get("/api/projects").json()["projects"] == []
 
 
 def test_an_unknown_kind_is_a_clean_400(client):

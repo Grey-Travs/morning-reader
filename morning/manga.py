@@ -102,6 +102,35 @@ class ScriptResult:
 
 # ---- collecting --------------------------------------------------------------
 
+def panel_numbers(read: PageRead, *,
+                  kinds: frozenset[str] | set[str] = TRANSLATED_KINDS
+                  ) -> dict[str, int]:
+    """Each region's panel number, 1-based, or 0 for a region in no panel.
+
+    Numbered by first appearance in READING order, counting only the lines that are
+    translated, rather than kept as the geometry emitted them. The two disagree once a
+    human has reordered a page, and a script whose headers ran "panel 2, panel 1,
+    panel 2" would read as an error rather than as the reading order it faithfully is.
+
+    The ONE numbering: the translation call and the reader both use it. They used to
+    number separately — the reader by raw geometry — so after a reorder the panel a
+    line showed was not the panel the model had been told it was in.
+
+    A region that is not translated takes the number of the panel it sits in when
+    that panel has one, and 0 otherwise; nothing about it moves the count.
+    """
+    geometric = propose_panels(read.regions)
+    group_of = {rid: i for i, panel in enumerate(geometric) for rid in panel}
+    seen: dict[int, int] = {}
+    for region in read.in_order():
+        if region.kind not in kinds or not (region.text or "").strip():
+            continue
+        group = group_of.get(region.id)
+        if group is not None:
+            seen.setdefault(group, len(seen) + 1)
+    return {rid: seen.get(group, 0) for rid, group in group_of.items()}
+
+
 def collect_lines(reads: list[tuple[int, PageRead]], *,
                   kinds: frozenset[str] | set[str] = TRANSLATED_KINDS
                   ) -> list[ScriptLine]:
@@ -110,31 +139,20 @@ def collect_lines(reads: list[tuple[int, PageRead]], *,
     ``reads`` is ``(page seq, PageRead)`` in page order, and the PageRead is the
     EFFECTIVE one — a human's corrected reading order already applied. This module
     never looks at storage, so whose order won is settled before it is called.
-
-    Panels are renumbered by first appearance rather than kept as the geometry emitted
-    them. The two can disagree once a human has reordered a page, and a script whose
-    headers ran "panel 2, panel 1, panel 2" would read as an error rather than as the
-    reading order it faithfully is.
+    Panels are numbered by :func:`panel_numbers`, the same numbering the reader shows.
     """
     out: list[ScriptLine] = []
     for seq, read in reads:
-        geometric = propose_panels(read.regions)
-        panel_of = {rid: i for i, panel in enumerate(geometric) for rid in panel}
-        seen: dict[int, int] = {}
+        numbers = panel_numbers(read, kinds=kinds)
         for region in read.in_order():
             if region.kind not in kinds:
                 continue
             text = (region.text or "").strip()
             if not text:
                 continue
-            group = panel_of.get(region.id)
-            if group is None:
-                number = 0
-            else:
-                number = seen.setdefault(group, len(seen) + 1)
             out.append(ScriptLine(
                 page_seq=seq, region_id=region.id, kind=region.kind, text=text,
-                source_hash=region_hash(region), panel=number))
+                source_hash=region_hash(region), panel=numbers.get(region.id, 0)))
     return out
 
 

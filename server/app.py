@@ -37,6 +37,7 @@ from morning.chapter_files import (
 from morning.chapters import classify
 from morning.config import Config
 from morning.images import MAX_IMAGE_BYTES, inspect, unsupported_reason
+from morning.manga import panel_numbers
 from morning.page_build import assemble, assemble_spans, propose_join
 from morning.pageread import TRANSLATED_KINDS, is_drawable, region_hash
 from morning.reading_order import propose_order, propose_panels
@@ -304,6 +305,12 @@ async def create_upload_project(file: UploadFile, title: str = "",
 
 def _create_from_text(title: str, kind: str, text: str, mode: str,
                       separator: str) -> dict:
+    # First, so a manga pasted as text is told what to do instead of being told its
+    # text was empty or too long.
+    try:
+        pj.check_kind_and_ingest(kind, pj.INGEST_TEXT)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if len((text or "").encode("utf-8")) > MAX_SOURCE_BYTES:
         raise HTTPException(413, "That text is larger than Morning Reader accepts "
                                  "(20 MB). Split it and add the parts separately.")
@@ -536,6 +543,12 @@ async def create_docs_project(req: CreateDocsProject) -> dict:
                                  "Paste the document's address, or its id.")
     if req.kind not in pj.KINDS:
         raise HTTPException(400, f"Unknown kind {req.kind!r}.")
+    # Before the fetch: a manga cannot come from a Doc, and the refusal should not
+    # wait on a round trip to Google to say so.
+    try:
+        pj.check_kind_and_ingest(req.kind, pj.INGEST_DOCS)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     chapters = await run_in_threadpool(_fetch_doc_chapters, cfg, doc_id)
     if not chapters:
@@ -1074,7 +1087,9 @@ def _manga_page_payload(page: dict) -> dict:
     lines = page.get("lines")
     lines = lines if isinstance(lines, dict) else {}
     panels = propose_panels(read.regions)
-    panel_of = {rid: i + 1 for i, panel in enumerate(panels) for rid in panel}
+    # The translation call's numbering, not the raw geometric one: after a reorder
+    # the two disagree, and a line must show the panel the model was told it is in.
+    panel_of = panel_numbers(read)
 
     regions = []
     for region in read.in_order():

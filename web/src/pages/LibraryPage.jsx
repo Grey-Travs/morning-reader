@@ -164,7 +164,12 @@ function AddWork({ onAdded, onError }) {
         </label>
         <label className="block">
           <span className="mb-1 block text-xs text-muted">What is it?</span>
-          <select className="field" value={kind} onChange={(e) => setKind(e.target.value)}>
+          <select className="field" value={kind} onChange={(e) => {
+            setKind(e.target.value)
+            // A manga is its pictures. From text or a Doc it would be a work with no
+            // pages that nothing can translate or read — the server refuses it too.
+            if (e.target.value === 'manga') setSource('scans')
+          }}>
             <option value="novel">Novel</option>
             <option value="manga">Manga</option>
           </select>
@@ -180,11 +185,20 @@ function AddWork({ onAdded, onError }) {
               <label key={value} className="flex items-center gap-2">
                 <input type="radio" name="source" value={value}
                        checked={source === value}
+                       disabled={kind === 'manga' && value !== 'scans'}
                        onChange={() => setSource(value)} />
-                <span>{label}</span>
+                <span className={kind === 'manga' && value !== 'scans' ? 'text-hint' : ''}>
+                  {label}
+                </span>
               </label>
             ))}
         </div>
+        {kind === 'manga' && (
+          <p className="mt-1 text-xs text-hint">
+            A manga is added from its page images — the words are read off the art, and
+            the English is placed back over it.
+          </p>
+        )}
       </fieldset>
 
       {source === 'docs' && (

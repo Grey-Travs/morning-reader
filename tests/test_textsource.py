@@ -26,6 +26,28 @@ def test_japanese_chapter_counters_are_recognised():
         assert looks_like_heading(heading), heading
 
 
+def test_full_width_chapter_numbers_are_recognised():
+    """Japanese typesetting numbers chapters in full-width digits as often as ASCII.
+    Missed, a whole file numbered that way came through as ONE chapter with its
+    headings translated as prose — and no error."""
+    for heading in ("第１話", "１２話", "第１２章", "第３巻", "第１話　朝の駅",
+                    "Ｃｈａｐｔｅｒ　３", "ｅｐ．７"):
+        assert looks_like_heading(heading), heading
+
+
+def test_the_fold_decides_but_the_title_keeps_its_own_characters():
+    text = f"第１話　朝の駅\n\n{JA_A}\n\n第２話\n\n{JA_B}"
+    chapters = split_text_into_chapters(text, mode="heading")
+
+    assert [c.title for c in chapters] == ["第１話　朝の駅", "第２話"]
+    assert [c.paragraphs for c in chapters] == [[JA_A], [JA_B]]
+
+
+def test_full_width_prose_is_still_prose():
+    for line in ("１２時に駅で会った。", "３人は黙っていた。", "ＯＫ、わかった。"):
+        assert not looks_like_heading(line), line
+
+
 def test_japanese_kind_words_are_recognised():
     """序章 / 終章 / 外伝 are the same Kanji as 서장 / 종장 / 외전."""
     for heading in ("序章", "終章", "外伝", "間章",

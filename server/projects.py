@@ -114,18 +114,37 @@ def _write_project(project: dict) -> dict:
     return project
 
 
+MANGA_NEEDS_IMAGES = ("A manga is added from its page images — the words are read off "
+                      "the art, and the English is placed back over it. Choose "
+                      "\"Photographs or scans\".")
+
+
+def check_kind_and_ingest(kind: str, ingest: str) -> None:
+    """Raise ``ValueError`` for a kind, an ingestion, or a pairing that cannot work.
+
+    A manga is its pictures. Created from pasted text or a Doc it gets a prose
+    source.json and no pages — and every manga route reads pages while every prose
+    route refuses a manga, so the result is a work that can be neither translated nor
+    read, with nothing on screen saying why. Refused here, in the one place every
+    creation path goes through, rather than in each route.
+    """
+    if kind not in KINDS:
+        raise ValueError(f"unknown kind {kind!r}; expected one of {KINDS}")
+    if ingest not in INGESTS:
+        raise ValueError(f"unknown ingestion {ingest!r}; expected one of {INGESTS}")
+    if kind == KIND_MANGA and ingest != INGEST_IMAGES:
+        raise ValueError(MANGA_NEEDS_IMAGES)
+
+
 def create_project(title: str, *, kind: str = KIND_NOVEL, ingest: str = INGEST_TEXT,
                    pid: str | None = None) -> dict:
     """Create an empty project folder and its record.
 
     Raises ``ValueError`` on an unknown kind or ingestion rather than defaulting to
     novel: a manga silently created as a novel would take the flatten path and lose
-    every region it ever reads.
+    every region it ever reads. See ``check_kind_and_ingest`` for the pairing rule.
     """
-    if kind not in KINDS:
-        raise ValueError(f"unknown kind {kind!r}; expected one of {KINDS}")
-    if ingest not in INGESTS:
-        raise ValueError(f"unknown ingestion {ingest!r}; expected one of {INGESTS}")
+    check_kind_and_ingest(kind, ingest)
     pid = pid or uuid.uuid4().hex[:12]
     if not _PROJECT_ID_RE.match(pid):
         raise ValueError("invalid project id")

@@ -288,6 +288,24 @@ def test_a_link_that_is_not_a_document_is_a_clean_400(client, connected):
     assert "Google Doc link" in response.json()["detail"]["title"]
 
 
+def test_a_manga_is_refused_before_google_is_asked_anything(client, monkeypatch):
+    """A manga is its pictures. Made from a Doc it would get a prose source and no
+    pages — a work nothing can translate or read. Refused before the fetch, so the
+    answer does not wait on Google or depend on being signed in."""
+    monkeypatch.setattr(google_auth, "saved_credentials", lambda token_file: object())
+
+    def must_not_fetch(*args, **kw):
+        raise AssertionError("the document was fetched for a manga")
+
+    monkeypatch.setattr(docs_source, "load_chapters", must_not_fetch)
+    response = client.post("/api/projects/docs",
+                           json={"document": DOC_URL, "kind": "manga"})
+
+    assert response.status_code == 400
+    assert "page images" in response.json()["detail"]["title"]
+    assert client.get("/api/projects").json()["projects"] == []
+
+
 def test_a_document_without_tabs_is_reported_as_such(client, monkeypatch):
     monkeypatch.setattr(google_auth, "saved_credentials", lambda token_file: object())
 

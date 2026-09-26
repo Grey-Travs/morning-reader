@@ -378,6 +378,54 @@ class TestTheChapterPayload:
         page = client.get(f"/api/projects/{manga}/manga/1").json()["pages"][0]
         assert page["order_check"]["looks_reversed"] is True
 
+    @pytest.mark.parametrize("human_order", [None, ["bl", "br", "tl", "tr"]])
+    def test_a_line_shows_the_panel_the_translator_was_told(
+            self, client, manga, human_order):
+        """The reader numbered panels by raw geometry (here tr, tl, br, bl) while the
+        translation call numbered them by first appearance in reading order. On a page
+        read any other way — by the model, or after a human reorder — a line showed
+        "panel 2, panel 1, panel 4, panel 3", and not the panel the model was told."""
+        from morning.manga import collect_lines
+
+        with pages_mod.mutate_pages(manga) as doc:
+            doc["pages"][0]["read"]["regions"] = [
+                region("tl", "a", 0, box=(0.05, 0.05, 0.40, 0.40)),
+                region("tr", "b", 1, box=(0.55, 0.05, 0.40, 0.40)),
+                region("bl", "c", 2, box=(0.05, 0.55, 0.40, 0.40)),
+                region("br", "d", 3, box=(0.55, 0.55, 0.40, 0.40)),
+            ]
+        client.post(f"/api/projects/{manga}/pages/build")
+        if human_order:
+            assert client.post(f"/api/projects/{manga}/pages/00000001/order",
+                               json={"ids": human_order}).status_code == 200
+
+        regions = client.get(f"/api/projects/{manga}/manga/1").json()[
+            "pages"][0]["regions"]
+
+        assert [r["panel"] for r in regions] == [1, 2, 3, 4]
+        stored = pages_mod.load_pages(manga)["pages"][0]
+        read, _note = pages_mod.effective_read(stored)
+        told = {line.region_id: line.panel for line in collect_lines([(1, read)])}
+        assert {r["id"]: r["panel"] for r in regions} == told
+
+    def test_a_region_that_is_not_translated_never_moves_the_count(self, client, manga):
+        from morning.pageread import KIND_PAGE_NUMBER
+
+        with pages_mod.mutate_pages(manga) as doc:
+            doc["pages"][0]["read"]["regions"] = [
+                region("pn", "—26—", 0, box=(0.45, 0.93, 0.10, 0.04),
+                       kind=KIND_PAGE_NUMBER),
+                region("tr", "b", 1, box=(0.55, 0.05, 0.40, 0.40)),
+                region("tl", "a", 2, box=(0.05, 0.05, 0.40, 0.40)),
+            ]
+        client.post(f"/api/projects/{manga}/pages/build")
+
+        regions = client.get(f"/api/projects/{manga}/manga/1").json()[
+            "pages"][0]["regions"]
+
+        panels = {r["id"]: r["panel"] for r in regions}
+        assert (panels["tr"], panels["tl"]) == (1, 2)
+
     def test_a_sound_effect_is_translatable_and_a_page_number_is_not(
             self, client, manga):
         from morning.pageread import KIND_PAGE_NUMBER

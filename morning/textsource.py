@@ -19,6 +19,7 @@ Splitting modes:
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .chapters import Chapter, strip_invisibles
 
@@ -50,6 +51,19 @@ _HEADING_RE = re.compile(
     r")\s*[:：.\-–「]?\s*.*$",
     re.IGNORECASE,
 )
+
+
+def _heading_match(line: str):
+    """``_HEADING_RE`` against the line folded to plain width.
+
+    Japanese typesetting numbers chapters in full-width digits as often as in ASCII —
+    第１２話 is as ordinary as 第12話 — and the class above spells out ``0-9``. Without
+    the fold a whole file numbered that way is one chapter, its headings translated as
+    prose, with no error. NFKC is for the DECISION only: the title keeps the author's
+    own characters.
+    """
+    return _HEADING_RE.match(unicodedata.normalize("NFKC", line))
+
 
 # A line that ends the way a sentence ends. Titles do not: "第1話　朝の駅" and
 # "Chapter 3" carry no terminal stop, while "電車はまだ来ない。" and "She waited." do.
@@ -88,7 +102,7 @@ def _first_line_title(block: str, fallback: str) -> tuple[str, str]:
     if not head or len(head) > _MAX_TITLE_CHARS:
         return fallback, block
     # An explicit chapter marker is a title however it is punctuated.
-    if _HEADING_RE.match(head):
+    if _heading_match(head):
         return head, rest
     # A line that ENDS LIKE A SENTENCE is prose, however short it is. Without this,
     # any chapter opening with a brief sentence loses that sentence into its title —
@@ -113,7 +127,7 @@ def _make(index: int, title: str, body: str) -> Chapter | None:
 def looks_like_heading(line: str) -> bool:
     """Whether one line reads as a chapter heading. Exported because the page-build
     step (step 3) needs the same judgement about a page's first line."""
-    return bool(line.strip()) and bool(_HEADING_RE.match(line))
+    return bool(line.strip()) and bool(_heading_match(line))
 
 
 def split_text_into_chapters(text: str, mode: str = "separator",

@@ -48,10 +48,26 @@ def test_an_empty_title_gets_a_placeholder():
 
 def test_both_kinds_can_be_created():
     novel = pj.create_project("a novel", kind=pj.KIND_NOVEL)
-    manga = pj.create_project("a manga", kind=pj.KIND_MANGA)
+    manga = pj.create_project("a manga", kind=pj.KIND_MANGA, ingest=pj.INGEST_IMAGES)
 
     assert novel["kind"] == "novel"
     assert manga["kind"] == "manga"
+
+
+@pytest.mark.parametrize("ingest", [pj.INGEST_TEXT, pj.INGEST_DOCS, pj.INGEST_EXPORT])
+def test_a_manga_is_only_ever_made_from_its_pictures(ingest):
+    """A manga made from text gets a prose source and no pages: the manga routes read
+    pages and the prose routes refuse a manga, so it could be neither translated nor
+    read, and nothing would say why."""
+    with pytest.raises(ValueError, match="page images"):
+        pj.create_project("x", kind=pj.KIND_MANGA, ingest=ingest)
+
+    assert pj.list_projects() == []
+
+
+@pytest.mark.parametrize("ingest", [pj.INGEST_TEXT, pj.INGEST_DOCS, pj.INGEST_IMAGES])
+def test_a_novel_can_come_from_anywhere(ingest):
+    assert pj.create_project("x", ingest=ingest)["ingest"] == ingest
 
 
 def test_an_unknown_kind_is_refused_rather_than_defaulted():
@@ -91,7 +107,7 @@ def test_a_new_project_starts_ongoing_and_unarchived():
 # ---- reading -----------------------------------------------------------------
 
 def test_a_project_can_be_read_back():
-    created = pj.create_project("朝の駅", kind=pj.KIND_MANGA)
+    created = pj.create_project("朝の駅", kind=pj.KIND_MANGA, ingest=pj.INGEST_IMAGES)
 
     assert pj.get_project(created["id"]) == created
 
@@ -293,7 +309,8 @@ def test_project_config_does_not_mutate_the_global():
 def test_two_projects_never_share_a_glossary():
     """Novels and manga are unrelated works, so there is no cross-project merge and
     no shared glossary — by construction, not by policy."""
-    a, b = pj.create_project("a"), pj.create_project("b", kind=pj.KIND_MANGA)
+    a = pj.create_project("a")
+    b = pj.create_project("b", kind=pj.KIND_MANGA, ingest=pj.INGEST_IMAGES)
     cfg_a = pj.project_config(Config(), a)
     cfg_b = pj.project_config(Config(), b)
 
